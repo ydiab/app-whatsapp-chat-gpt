@@ -26,12 +26,12 @@ app.get('/', (req, res) => {
 // Route for POST requests
 app.post('/', (req, res) => {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  console.log(\nWebhook received ${timestamp}\n);
+  console.log(`Webhook received ${timestamp}`);
   console.log(JSON.stringify(req.body, null, 2));
   res.status(200).end();
 });
 
 // Start the server
 app.listen(port, () => {
-  console.log(\nListening on port ${port}\n);
+  console.log(`Listening on port ${port}`);
 });
