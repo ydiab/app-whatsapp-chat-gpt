@@ -1,11 +1,21 @@
+const fs = require("node:fs/promises");
 const express = require("express");
 const { randomUUID } = require("node:crypto");
-const { CREATE_RECIPE_BUTTON_ID } = require("../constants");
+const {
+	CREATE_RECIPE_BUTTON_ID,
+	ADD_TO_COOKIDOO_BUTTON_ID,
+} = require("../constants");
 const {
 	getConversation,
 	pushConversationMessage,
 } = require("../store/conversationStore");
+const {
+	setLastCreatedRecipeId,
+	getLastCreatedRecipeId,
+} = require("../store/lastRecipeByUser");
 const { recipeStore } = require("../store/recipeStore");
+const { pushRecipeToCookidooBridge } = require("../services/cookidooBridge");
+const { uploadRecipeToCookidooAccount } = require("../services/cookidooUpload");
 const {
 	buildInvisibleRecipeUrl,
 	buildMetadataUrl,
@@ -72,6 +82,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 					...recipe,
 				};
 				recipeStore.set(recipeId, recipeRecord);
+				setLastCreatedRecipeId(from, recipeId);
 
 				const recipeUrl = buildInvisibleRecipeUrl(
 					req,
@@ -86,6 +97,81 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				await whatsapp.sendText(
 					from,
 					`Receta creada ✅\n${recipe.title} (${recipe.total_time_min} min, ${recipe.servings} porciones)\n\nURL Cookidoo-ready (HTML invisible): ${recipeUrl}\nMetadata JSON: ${metadataUrl}`,
+				);
+				return;
+			}
+
+			if (buttonId === ADD_TO_COOKIDOO_BUTTON_ID) {
+				const lastId = getLastCreatedRecipeId(from);
+				const recipe = lastId ? recipeStore.get(lastId) : null;
+
+				if (!recipe) {
+					await whatsapp.sendText(
+						from,
+						"Primero pulsa «Crear Receta» para generar la receta estructurada. Después podrás usar «A mi Cookidoo» con esa última receta.",
+					);
+					return;
+				}
+
+				let credentialsOk = false;
+				try {
+					await fs.access(config.cookidooCredentialsPath);
+					credentialsOk = true;
+				} catch {
+					credentialsOk = false;
+				}
+
+				if (credentialsOk) {
+					try {
+						const { recipeUrl } = await uploadRecipeToCookidooAccount(
+							recipe,
+							config.cookidooCredentialsPath,
+						);
+						await whatsapp.sendText(
+							from,
+							`Receta añadida a tu Cookidoo ✅\n${recipeUrl}`,
+						);
+					} catch (cookidooError) {
+						console.error("Cookidoo upload error:", cookidooError);
+						await whatsapp.sendText(
+							from,
+							`No pude subir la receta a Cookidoo: ${cookidooError.message}`,
+						);
+					}
+					return;
+				}
+
+				if (config.cookidooBridgeUrl) {
+					try {
+						const { parsed } = await pushRecipeToCookidooBridge({
+							bridgeUrl: config.cookidooBridgeUrl,
+							bridgeSecret: config.cookidooBridgeSecret,
+							recipe,
+							whatsappFrom: from,
+						});
+						const link =
+							parsed &&
+							typeof parsed === "object" &&
+							(parsed.cookidooRecipeUrl || parsed.url);
+						await whatsapp.sendText(
+							from,
+							link
+								? `Listo: la receta se envió al puente Cookidoo.\n${link}`
+								: "Listo: la receta se envió al puente Cookidoo (revisa tu cuenta / respuesta del puente).",
+						);
+					} catch (bridgeError) {
+						console.error("Cookidoo bridge error:", bridgeError);
+						await whatsapp.sendText(
+							from,
+							`No pude completar la subida vía puente: ${bridgeError.message}`,
+						);
+					}
+					return;
+				}
+
+				await whatsapp.sendText(
+					from,
+					`Para subir la receta a tu cuenta Cookidoo, crea el fichero cookidoo-credentials.json en la raíz del proyecto (copia cookidoo-credentials.example.json y rellénalo). Ruta alternativa: variable COOKIDOO_CREDENTIALS_PATH. Opcional: COOKIDOO_BRIDGE_URL si prefieres un servicio intermedio.`,
 				);
 				return;
 			}
@@ -106,9 +192,9 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 			conversation.lastAssistantProposal = proposal;
 			pushConversationMessage(from, "assistant", proposal);
 
-			await whatsapp.sendCreateRecipeButton(
+			await whatsapp.sendRecipeIterationButtons(
 				from,
-				`${proposal}\n\nSi te convence, pulsa "Crear Receta". Si no, dime qué quieres cambiar.`,
+				`${proposal}\n\nSi te convence, pulsa "Crear Receta". Luego puedes pulsar "A mi Cookidoo" para subir la última receta a tu cuenta (fichero cookidoo-credentials.json o puente COOKIDOO_BRIDGE_URL). Si no, dime qué quieres cambiar.`,
 			);
 
 			console.log("Reply sent");
