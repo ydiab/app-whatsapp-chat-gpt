@@ -22,12 +22,25 @@ Devuelve EXCLUSIVAMENTE JSON válido (sin markdown) con este esquema:
     { "name": "string", "quantity": "string" }
   ],
   "steps": [
-    { "order": number, "text": "string", "tm_mode": "string" }
+    { "order": number, "text": "string", "tm_mode": "string", "ingredient_indices": [0, 1] }
   ],
   "tags": ["string"],
   "nutrition_notes": "string"
 }
-La receta debe incluir velocidad, temperatura y tiempo cuando aplique.
+INGREDIENTES (báscula Thermomix en gramos):
+- Peso SIEMPRE en gramos: quantity como "120 g", nunca ml, litros ni unidades (nada de "1 pimiento" ni "1 pimiento (120g) mediano").
+- name específico: "pimiento rojo", "pimiento verde", "cebolla", etc. La línea en Cookidoo será "120 g de pimiento rojo".
+- Líquidos: convierte ml a gramos aproximados (agua/leche 1 ml ≈ 1 g).
+
+PASOS Y COOKIDOO:
+- "ingredient_indices": índices 0-based de ingredientes que se usan en ese paso. Cada ingrediente en al menos un paso.
+- "text": solo la acción (ej. "Añadir al vaso y programar"). NO repitas tiempos ni temperatura en text.
+- "tm_mode" OBLIGATORIO en todo paso que cocine/mezcle en el vaso. Formato EXACTO con barras:
+  "7 min / 100°C / Vel 1 giro inverso"
+  "7 min / 100°C / Vel soft giro inverso"
+  "3 min / Varoma / Vel 2"
+  "20 seg / Vel 8"
+  Velocidades: número 0.5-10, o "soft" para cuchara. Giro inverso pegado a la velocidad (sin barra extra): "Vel 1 giro inverso".
 Petición del usuario: ${userPrompt}
 `.trim();
 

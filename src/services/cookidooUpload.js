@@ -1,14 +1,21 @@
 /**
  * Subida directa a Cookidoo (no API pública oficial).
- * Flujo alineado con el cliente móvil (token) + endpoints web de recetas creadas,
- * documentado en proyectos comunitarios (p. ej. mcp-cookidoo / cookidoo-api).
- * Puede dejar de funcionar si Vorwerk cambia la API; úsalo bajo tu responsabilidad.
+ * Ingredientes en lista + pasos con el mismo texto de cada línea al inicio del paso
+ * y annotations tipo INGREDIENT con position { offset, length } sobre step.text
+ * (contrato documentado en @recode-software/cookidoo-api).
+ * CREATE/PATCH contra el API móvil *.tmmobile.vorwerk-digital.com; el enlace web
+ * de la receta sigue usando cookidooBaseUrl del JSON de credenciales.
  */
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { monotonicUlid } = require("../utils/ulid");
+const {
+	formatIngredientLine,
+	resolveTmModeChip,
+	findCookingAnnotationsInText,
+} = require("../utils/thermomixCookidoo");
 
-/** Mismo cliente OAuth que usa la app móvil Cookidoo (público en cookidoo-api). */
 const COOKIDOO_TOKEN_AUTHORIZATION =
 	"Basic a3VwZmVyd2Vyay1jbGllbnQtbndvdDpMczUwT04xd295U3FzMWRDZEpnZQ==";
 
@@ -33,7 +40,6 @@ async function loadCookidooCredentials(credentialsPath) {
 			throw new Error(`Falta el campo "${key}" en ${resolved}`);
 		}
 	}
-	/** Valores permitidos por la API web (fixtures cookidoo-api usan "portion"). */
 	const yieldUnitText =
 		data.yieldUnitText === null || data.yieldUnitText === undefined
 			? "portion"
@@ -46,7 +52,9 @@ async function loadCookidooCredentials(credentialsPath) {
 		cookidooBaseUrl: String(data.cookidooBaseUrl).replace(/\/$/, ""),
 		language: String(data.language),
 		tools:
-			Array.isArray(data.tools) && data.tools.length > 0 ? data.tools : ["TM7"],
+			Array.isArray(data.tools) && data.tools.length > 0
+				? data.tools
+				: ["TM7", "TM6"],
 		yieldUnitText,
 	};
 }
@@ -90,44 +98,203 @@ async function cookidooRequestToken(creds) {
 	return data.access_token;
 }
 
-function mapRecipeToCookidooPayload(recipe, creds) {
-	const title = recipe.title || "Receta";
-	const servings = Number(recipe.servings) || 4;
-	const totalMin = Number(recipe.total_time_min) || 30;
-	const totalSeconds = Math.max(60, totalMin * 60);
-
-	const ingredients = (recipe.ingredients || []).map((item) => {
-		const q = item.quantity != null ? String(item.quantity).trim() : "";
-		const n = item.name != null ? String(item.name).trim() : "";
-		return q && n ? `${q} ${n}` : n || q || "ingrediente";
-	});
-
-	const steps = [...(recipe.steps || [])]
-		.sort((a, b) => (a.order || 0) - (b.order || 0))
-		.map((step) => {
-			const t = step.text != null ? String(step.text).trim() : "";
-			const mode = step.tm_mode != null ? String(step.tm_mode).trim() : "";
-			return mode ? `${t} (${mode})` : t || "paso";
-		});
-
-	const hintParts = [];
-	if (recipe.description) hintParts.push(String(recipe.description));
-	if (recipe.nutrition_notes) hintParts.push(String(recipe.nutrition_notes));
-	const hints = hintParts.join("\n\n");
-
-	return {
-		title,
-		servings,
-		totalSeconds,
-		ingredients,
-		steps,
-		hints,
-		tools: creds.tools,
-	};
+function normalizeForMatch(s) {
+	return String(s)
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/\p{M}/gu, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 /**
- * Crea receta vacía (POST) y rellena contenido (PATCH), igual que mcp-cookidoo.
+ * Si el modelo no envía ingredient_indices, infiere qué ingrediente va en qué paso
+ * por aparición del nombre del ingrediente en el texto del paso.
+ */
+function inferIngredientIndicesPerStep(recipe) {
+	const ingredients = recipe.ingredients || [];
+	const sortedSteps = [...(recipe.steps || [])].sort(
+		(a, b) => (a.order || 0) - (b.order || 0),
+	);
+	const n = ingredients.length;
+	const perStep = sortedSteps.map(() => new Set());
+
+	for (let i = 0; i < n; i++) {
+		const name =
+			ingredients[i].name != null ? String(ingredients[i].name).trim() : "";
+		const needle = normalizeForMatch(name);
+		if (needle.length < 2) continue;
+
+		let bestStep = 0;
+		let bestScore = -1;
+		for (let j = 0; j < sortedSteps.length; j++) {
+			const hay = normalizeForMatch(sortedSteps[j].text || "");
+			if (!hay.includes(needle)) continue;
+			const score = needle.length;
+			if (score > bestScore) {
+				bestScore = score;
+				bestStep = j;
+			}
+		}
+		if (bestScore >= 0) {
+			perStep[bestStep].add(i);
+		}
+	}
+
+	for (let i = 0; i < n; i++) {
+		let assigned = false;
+		for (const set of perStep) {
+			if (set.has(i)) {
+				assigned = true;
+				break;
+			}
+		}
+		if (!assigned && perStep.length > 0) {
+			perStep[0].add(i);
+		}
+	}
+
+	return sortedSteps.map((step, j) => ({
+		order: step.order ?? j + 1,
+		text: step.text != null ? String(step.text).trim() : "",
+		tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
+		ingredient_indices:
+			Array.isArray(step.ingredient_indices) &&
+			step.ingredient_indices.length > 0
+				? [...new Set(step.ingredient_indices.map(Number))].filter(
+						(x) => !Number.isNaN(x) && x >= 0 && x < n,
+					)
+				: [...perStep[j]],
+	}));
+}
+
+function buildIngredientRows(recipe) {
+	const ingredients = recipe.ingredients || [];
+	return ingredients.map((item) => {
+		const text = formatIngredientLine(item);
+		const name =
+			item.name != null
+				? String(item.name).trim()
+				: text.split(/\s+/).slice(1).join(" ");
+		return {
+			localId: monotonicUlid(),
+			text,
+			name,
+		};
+	});
+}
+
+/**
+ * Anotaciones INGREDIENT alineadas con substring exacto en `text` (offset/length).
+ * @param {string} text
+ * @param {string[]} lines
+ * @returns {object[]}
+ */
+function buildIngredientAnnotations(text, lines) {
+	const annotations = [];
+	let searchStart = 0;
+	for (const line of lines) {
+		if (!line) continue;
+		const offset = text.indexOf(line, searchStart);
+		if (offset < 0) continue;
+		annotations.push({
+			type: "INGREDIENT",
+			data: {
+				description: line,
+				notes: [],
+			},
+			position: { offset, length: line.length },
+		});
+		searchStart = offset + line.length;
+	}
+	annotations.sort((a, b) => a.position.offset - b.position.offset);
+	return annotations;
+}
+
+/**
+ * @param {{ text: string, tm_mode?: string, ingredient_indices?: number[] }} step
+ * @param {{ text: string, localId: string }[]} rows
+ * @param {{ withAnnotations?: boolean }} opts
+ */
+function buildStepInstruction(step, rows, opts = {}) {
+	const withAnnotations = opts.withAnnotations !== false;
+	const indices = [...new Set(step.ingredient_indices || [])]
+		.filter((i) => i >= 0 && i < rows.length)
+		.sort((a, b) => a - b);
+	const lines = indices.map((i) => rows[i].text).filter(Boolean);
+	const body = step.text ? String(step.text).trim() : "";
+	const tmChip = resolveTmModeChip(step);
+
+	const textParts = [];
+	if (lines.length > 0) {
+		textParts.push(lines.join("\n"));
+	}
+	if (body) {
+		textParts.push(body);
+	}
+	if (tmChip) {
+		textParts.push(tmChip);
+	}
+	const text = textParts.join("\n\n") || "paso";
+
+	const instruction = {
+		type: "STEP",
+		text,
+	};
+
+	if (!withAnnotations) {
+		return instruction;
+	}
+
+	const annotations = [];
+
+	if (lines.length > 0) {
+		const ing = buildIngredientAnnotations(text, lines);
+		if (ing.length === lines.length) {
+			annotations.push(...ing);
+		}
+	}
+
+	if (tmChip) {
+		const cooking = findCookingAnnotationsInText(text);
+		const match = cooking.find(
+			(a) =>
+				text.slice(a.position.offset, a.position.offset + a.position.length) ===
+				tmChip,
+		);
+		if (match) {
+			annotations.push(match);
+		} else {
+			const offset = text.indexOf(tmChip);
+			const fallback = findCookingAnnotationsInText(tmChip)[0];
+			if (offset >= 0 && fallback) {
+				annotations.push({
+					...fallback,
+					position: { offset, length: tmChip.length },
+				});
+			}
+		}
+	}
+
+	if (annotations.length > 0) {
+		annotations.sort((a, b) => a.position.offset - b.position.offset);
+		instruction.annotations = annotations;
+	}
+
+	return instruction;
+}
+
+async function patchJson(url, authHeaders, body) {
+	const response = await fetch(url, {
+		method: "PATCH",
+		headers: authHeaders,
+		body: JSON.stringify(body),
+	});
+	const responseText = await response.text();
+	return { ok: response.ok, status: response.status, responseText };
+}
+
+/**
  * @returns {{ cookidooRecipeId: string, recipeUrl: string }}
  */
 async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
@@ -136,7 +303,22 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 
 	const baseOrigin = new URL(creds.cookidooBaseUrl).origin;
 	const { language } = creds;
-	const mapped = mapRecipeToCookidooPayload(recipe, creds);
+	const apiBase = `https://${creds.countryCode}.tmmobile.vorwerk-digital.com`;
+
+	const title = recipe.title || "Receta";
+	const servings = Number(recipe.servings) || 4;
+	const totalMin = Number(recipe.total_time_min) || 30;
+	const totalSeconds = Math.max(60, totalMin * 60);
+	const activeSeconds = Math.min(
+		totalSeconds,
+		Math.max(0, Math.floor(totalSeconds * 0.35)),
+	);
+	const cookSeconds = Math.max(0, totalSeconds - activeSeconds);
+
+	const hintParts = [];
+	if (recipe.description) hintParts.push(String(recipe.description));
+	if (recipe.nutrition_notes) hintParts.push(String(recipe.nutrition_notes));
+	const hints = hintParts.join("\n\n");
 
 	const authHeaders = {
 		Accept: "application/json",
@@ -144,11 +326,11 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 		Authorization: `Bearer ${accessToken}`,
 	};
 
-	const createUrl = `${baseOrigin}/created-recipes/${encodeURIComponent(language)}`;
+	const createUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}`;
 	const createRes = await fetch(createUrl, {
 		method: "POST",
 		headers: authHeaders,
-		body: JSON.stringify({ recipeName: mapped.title }),
+		body: JSON.stringify({ recipeName: title }),
 	});
 
 	const createText = await createRes.text();
@@ -175,41 +357,71 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 
 	await delay(5000);
 
-	const patchUrl = `${baseOrigin}/created-recipes/${encodeURIComponent(language)}/${encodeURIComponent(cookidooRecipeId)}`;
-	const patchBody = {
-		name: mapped.title,
+	const patchUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}/${encodeURIComponent(cookidooRecipeId)}`;
+
+	const rows = buildIngredientRows(recipe);
+	const enrichedSteps = inferIngredientIndicesPerStep(recipe);
+
+	const baseMeta = {
+		name: title,
 		image: null,
 		isImageOwnedByUser: false,
-		tools: mapped.tools,
-		yield: { value: mapped.servings, unitText: creds.yieldUnitText },
-		prepTime: 0,
-		cookTime: 0,
-		totalTime: mapped.totalSeconds,
-		ingredients: mapped.ingredients.map((text) => ({
-			type: "INGREDIENT",
-			text,
-		})),
-		instructions: mapped.steps.map((text) => ({
-			type: "STEP",
-			text,
-		})),
-		hints: mapped.hints || "",
+		tools: creds.tools,
+		yield: { value: servings, unitText: creds.yieldUnitText },
+		prepTime: activeSeconds,
+		cookTime: cookSeconds,
+		totalTime: totalSeconds,
+		hints: hints || "",
 		workStatus: "PRIVATE",
 		recipeMetadata: {
 			requiresAnnotationsCheck: false,
 		},
 	};
 
-	const patchRes = await fetch(patchUrl, {
-		method: "PATCH",
-		headers: authHeaders,
-		body: JSON.stringify(patchBody),
+	const ingredientsPayload = rows.map((row) => ({
+		type: "INGREDIENT",
+		localId: row.localId,
+		text: row.text,
+	}));
+
+	let ingRes = await patchJson(patchUrl, authHeaders, {
+		...baseMeta,
+		ingredients: ingredientsPayload,
 	});
 
-	const patchText = await patchRes.text();
-	if (!patchRes.ok && patchRes.status !== 204) {
+	if (!ingRes.ok && ingRes.status === 400) {
+		ingRes = await patchJson(patchUrl, authHeaders, {
+			...baseMeta,
+			ingredients: rows.map((row) => ({
+				type: "INGREDIENT",
+				text: row.text,
+			})),
+		});
+	}
+
+	if (!ingRes.ok && ingRes.status !== 204) {
 		throw new Error(
-			`Cookidoo actualizar receta HTTP ${patchRes.status}: ${patchText.slice(0, 500)}`,
+			`Cookidoo ingredientes HTTP ${ingRes.status}: ${ingRes.responseText.slice(0, 500)}`,
+		);
+	}
+
+	await delay(2000);
+
+	const patchInstructions = (withAnnotations) =>
+		patchJson(patchUrl, authHeaders, {
+			instructions: enrichedSteps.map((step) =>
+				buildStepInstruction(step, rows, { withAnnotations }),
+			),
+		});
+
+	let stepRes = await patchInstructions(true);
+	if (!stepRes.ok && stepRes.status === 400) {
+		stepRes = await patchInstructions(false);
+	}
+
+	if (!stepRes.ok && stepRes.status !== 204) {
+		throw new Error(
+			`Cookidoo pasos HTTP ${stepRes.status}: ${stepRes.responseText.slice(0, 500)}`,
 		);
 	}
 
