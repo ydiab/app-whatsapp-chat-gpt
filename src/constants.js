@@ -1,8 +1,10 @@
-const CREATE_RECIPE_BUTTON_ID = "create_recipe";
 /** WhatsApp reply button titles are max 20 characters. */
-const ADD_TO_COOKIDOO_BUTTON_ID = "add_to_cookidoo";
+const UPLOAD_TO_COOKIDOO_BUTTON_ID = "upload_to_cookidoo";
+
+/** Línea que el modelo añade al final cuando la receta está completa (no se muestra al usuario). */
+const RECETA_LISTA_MARKER = "[RECETA_LISTA]";
 
 module.exports = {
-	CREATE_RECIPE_BUTTON_ID,
-	ADD_TO_COOKIDOO_BUTTON_ID,
+	UPLOAD_TO_COOKIDOO_BUTTON_ID,
+	RECETA_LISTA_MARKER,
 };

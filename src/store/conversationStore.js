@@ -4,7 +4,7 @@ function getConversation(from) {
 	if (!conversationStore.has(from)) {
 		conversationStore.set(from, {
 			messages: [],
-			lastAssistantProposal: "",
+			recipeReady: false,
 		});
 	}
 	return conversationStore.get(from);
@@ -12,14 +12,25 @@ function getConversation(from) {
 
 function pushConversationMessage(from, role, content) {
 	const conversation = getConversation(from);
-	conversation.messages.push({ role, content });
+	const text =
+		typeof content === "string"
+			? content
+			: typeof content?.content === "string"
+				? content.content
+				: String(content ?? "");
+	conversation.messages.push({ role, content: text });
 	if (conversation.messages.length > 20) {
 		conversation.messages = conversation.messages.slice(-20);
 	}
+}
+
+function setRecipeReady(from, ready) {
+	getConversation(from).recipeReady = Boolean(ready);
 }
 
 module.exports = {
 	conversationStore,
 	getConversation,
 	pushConversationMessage,
+	setRecipeReady,
 };

@@ -1,25 +1,16 @@
 const fs = require("node:fs/promises");
 const express = require("express");
 const { randomUUID } = require("node:crypto");
-const {
-	CREATE_RECIPE_BUTTON_ID,
-	ADD_TO_COOKIDOO_BUTTON_ID,
-} = require("../constants");
+const { UPLOAD_TO_COOKIDOO_BUTTON_ID } = require("../constants");
 const {
 	getConversation,
 	pushConversationMessage,
+	setRecipeReady,
 } = require("../store/conversationStore");
-const {
-	setLastCreatedRecipeId,
-	getLastCreatedRecipeId,
-} = require("../store/lastRecipeByUser");
+const { setLastCreatedRecipeId } = require("../store/lastRecipeByUser");
 const { recipeStore } = require("../store/recipeStore");
 const { pushRecipeToCookidooBridge } = require("../services/cookidooBridge");
 const { uploadRecipeToCookidooAccount } = require("../services/cookidooUpload");
-const {
-	buildInvisibleRecipeUrl,
-	buildMetadataUrl,
-} = require("../utils/publicUrls");
 
 function createWebhookRouter({ config, whatsapp, recipeAi }) {
 	const router = express.Router();
@@ -55,63 +46,37 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 			const userText = message.text?.body?.trim();
 			const buttonId = message.interactive?.button_reply?.id;
 
-			await whatsapp.sendTypingIndicator(incomingMessageId);
+			try {
+				await whatsapp.sendTypingIndicator(incomingMessageId);
+			} catch {
+				// sendTypingIndicator ya registra el fallo; seguir con la respuesta
+			}
 
-			if (buttonId === CREATE_RECIPE_BUTTON_ID) {
+			if (buttonId === UPLOAD_TO_COOKIDOO_BUTTON_ID) {
 				const conversation = getConversation(from);
-				if (conversation.messages.length === 0) {
+				if (!conversation.recipeReady || conversation.messages.length === 0) {
 					await whatsapp.sendText(
 						from,
-						"No tengo contexto todavía. Escríbeme primero qué receta quieres (ej: arroz con pollo saludable).",
+						"Todavía no tengo una receta completa consensuada. Cuéntame qué quieres cocinar y cuando te enseñe la receta entera podrás subirla a Cookidoo.",
 					);
 					return;
 				}
 
-				const recipe = await recipeAi.generateFinalThermomixRecipe(
+				await whatsapp.sendText(
+					from,
+					"Perfecto, estoy subiendo tu receta a Cookidoo… ⏳",
+				);
+
+				const recipe = await recipeAi.generateRecipeForCookidoo(
 					conversation.messages,
 				);
 				const recipeId = randomUUID();
-				const createdAt = new Date().toISOString();
-				const recipeRecord = {
+				recipeStore.set(recipeId, {
 					id: recipeId,
-					createdAt,
-					sourcePrompt: conversation.messages
-						.filter((item) => item.role === "user")
-						.map((item) => item.content)
-						.join(" | "),
+					createdAt: new Date().toISOString(),
 					...recipe,
-				};
-				recipeStore.set(recipeId, recipeRecord);
+				});
 				setLastCreatedRecipeId(from, recipeId);
-
-				const recipeUrl = buildInvisibleRecipeUrl(
-					req,
-					recipeId,
-					config.publicBaseUrl,
-				);
-				const metadataUrl = buildMetadataUrl(
-					req,
-					recipeId,
-					config.publicBaseUrl,
-				);
-				await whatsapp.sendText(
-					from,
-					`Receta creada ✅\n${recipe.title} (${recipe.total_time_min} min, ${recipe.servings} porciones)\n\nURL Cookidoo-ready (HTML invisible): ${recipeUrl}\nMetadata JSON: ${metadataUrl}`,
-				);
-				return;
-			}
-
-			if (buttonId === ADD_TO_COOKIDOO_BUTTON_ID) {
-				const lastId = getLastCreatedRecipeId(from);
-				const recipe = lastId ? recipeStore.get(lastId) : null;
-
-				if (!recipe) {
-					await whatsapp.sendText(
-						from,
-						"Primero pulsa «Crear Receta» para generar la receta estructurada. Después podrás usar «A mi Cookidoo» con esa última receta.",
-					);
-					return;
-				}
 
 				let credentialsOk = false;
 				try {
@@ -129,7 +94,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 						);
 						await whatsapp.sendText(
 							from,
-							`Receta añadida a tu Cookidoo ✅\n${recipeUrl}`,
+							`¡Listo! Tu receta ya está en Cookidoo ✅\n${recipe.title}\n\n${recipeUrl}`,
 						);
 					} catch (cookidooError) {
 						console.error("Cookidoo upload error:", cookidooError);
@@ -156,14 +121,14 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 						await whatsapp.sendText(
 							from,
 							link
-								? `Listo: la receta se envió al puente Cookidoo.\n${link}`
-								: "Listo: la receta se envió al puente Cookidoo (revisa tu cuenta / respuesta del puente).",
+								? `Listo: receta enviada al puente Cookidoo.\n${link}`
+								: "Listo: receta enviada al puente Cookidoo.",
 						);
 					} catch (bridgeError) {
 						console.error("Cookidoo bridge error:", bridgeError);
 						await whatsapp.sendText(
 							from,
-							`No pude completar la subida vía puente: ${bridgeError.message}`,
+							`No pude completar la subida: ${bridgeError.message}`,
 						);
 					}
 					return;
@@ -171,7 +136,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 
 				await whatsapp.sendText(
 					from,
-					`Para subir la receta a tu cuenta Cookidoo, crea el fichero cookidoo-credentials.json en la raíz del proyecto (copia cookidoo-credentials.example.json y rellénalo). Ruta alternativa: variable COOKIDOO_CREDENTIALS_PATH. Opcional: COOKIDOO_BRIDGE_URL si prefieres un servicio intermedio.`,
+					"Para subir a Cookidoo necesitas cookidoo-credentials.json en el proyecto (copia cookidoo-credentials.example.json) o configurar COOKIDOO_BRIDGE_URL.",
 				);
 				return;
 			}
@@ -179,23 +144,35 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 			if (!userText) {
 				await whatsapp.sendText(
 					from,
-					"Cuéntame qué quieres cocinar y lo iteramos juntas. Cuando te guste la propuesta, pulsa el botón 'Crear Receta'.",
+					"Cuéntame qué quieres cocinar y lo vamos afinando juntas. Cuando te enseñe la receta completa, podrás subirla a Cookidoo.",
 				);
 				return;
 			}
 
 			pushConversationMessage(from, "user", userText);
 			const conversation = getConversation(from);
-			const proposal = await recipeAi.generateThermomixProposal(
-				conversation.messages,
+			const proposalResult =
+				await recipeAi.generateThermomixProposal(conversation.messages);
+			const proposal =
+				typeof proposalResult === "string"
+					? proposalResult
+					: String(proposalResult?.content ?? "").trim();
+			const isComplete = Boolean(
+				typeof proposalResult === "object" && proposalResult?.isComplete,
 			);
-			conversation.lastAssistantProposal = proposal;
+
+			if (!proposal) {
+				throw new Error("La propuesta de receta llegó vacía");
+			}
+
+			setRecipeReady(from, isComplete);
 			pushConversationMessage(from, "assistant", proposal);
 
-			await whatsapp.sendRecipeIterationButtons(
-				from,
-				`${proposal}\n\nSi te convence, pulsa "Crear Receta". Luego puedes pulsar "A mi Cookidoo" para subir la última receta a tu cuenta (fichero cookidoo-credentials.json o puente COOKIDOO_BRIDGE_URL). Si no, dime qué quieres cambiar.`,
-			);
+			if (isComplete) {
+				await whatsapp.sendUploadToCookidooButton(from, proposal);
+			} else {
+				await whatsapp.sendText(from, proposal);
+			}
 
 			console.log("Reply sent");
 		} catch (error) {
@@ -206,7 +183,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				if (fallbackFrom) {
 					await whatsapp.sendText(
 						fallbackFrom,
-						"Tuve un problema generando la receta. Inténtalo de nuevo con más detalle (ingredientes, tiempo, estilo).",
+						"Tuve un problema generando la respuesta. Inténtalo de nuevo con más detalle (ingredientes, tiempo, estilo).",
 					);
 				}
 			} catch (sendError) {

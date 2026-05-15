@@ -1,3 +1,4 @@
+const { RECETA_LISTA_MARKER } = require("../constants");
 const {
 	callOpenAI,
 	extractTextFromOpenAIResponse,
@@ -7,10 +8,16 @@ const {
 function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 	const ai = { openAiApiKey, openAiModel };
 
+	function parseProposalResponse(text) {
+		const raw = String(text || "").trim();
+		const isComplete = raw.includes(RECETA_LISTA_MARKER);
+		const content = raw.split(RECETA_LISTA_MARKER).join("").trim();
+		return { content, isComplete };
+	}
+
 	async function generateThermomixRecipe(userPrompt) {
 		const prompt = `
-Eres un chef experto en Thermomix.
-Genera UNA receta original en español para Thermomix.
+Eres un chef experto en Thermomix. A partir del historial de chat, genera la receta consensuada.
 Devuelve EXCLUSIVAMENTE JSON válido (sin markdown) con este esquema:
 {
   "title": "string",
@@ -40,8 +47,19 @@ PASOS Y COOKIDOO:
   "7 min / 100°C / Vel soft giro inverso"
   "3 min / Varoma / Vel 2"
   "20 seg / Vel 8"
-  Velocidades: número 0.5-10, o "soft" para cuchara. Giro inverso pegado a la velocidad (sin barra extra): "Vel 1 giro inverso".
-Petición del usuario: ${userPrompt}
+  Velocidades: número 0.5-10, o "soft" para cuchara. Giro inverso pegado a la velocidad: "Vel 1 giro inverso".
+
+  Calidad Thermomix (TM7 salvo que diga otro modelo):
+- Pocos pasos; no obligar a estar echando ingredientes cada dos minutos.
+- Todo en el vaso en orden, sin sacar y volver a meter cosas innecesariamente.
+- Recetas saladas sin sabor dulce: no picar verduras demasiado fino ni cocinarlas demasiado con cubretapa si no toca.
+- No caldosas salvo guisos, risottos o recetas de cuchara (ej. fajitas sin caldo).
+- Proteínas jugosas pero bien hechas; verduras en su punto.
+- Siempre intenta que las verduras se corten en la Thermomix, no que tenga que cortarlas antes de echarlas. El mínimo esfuerzo queremos.
+- Que las verduras queden bien hechas pero sin pasarnos.
+
+Historial / petición:
+${userPrompt}
 `.trim();
 
 		const data = await callOpenAI({ ...ai, input: prompt });
@@ -73,24 +91,28 @@ Petición del usuario: ${userPrompt}
 
 		const prompt = `
 Eres Mimi, asistente de Thermomix por WhatsApp.
-Objetivo: iterar una receta con la usuaria en lenguaje natural.
-Reglas:
-- Responde SIEMPRE en español.
-- No uses JSON.
-- Da una propuesta concreta: nombre de receta. Si le gusta la propuesta pon la receta completa con ingredientes, pasos, tiempo, porciones y calorías por porción, que sea fácil de visualizar en WhatsApp en modo lista.
-- Importante que siempre debes explicar que una vez consensuada la receta, el usuario solo tiene que pulsar el botón 'Crear Receta', que la crearás para Thermomix, y que le saldrá un link para importarla a Cookidoo.
-- Termina con una pregunta breve para seguir iterando (ej: si quiere cambios de ingredientes, tiempo, picante, calorías máximas etc.).
-- La receta debe ser para Thermomix TM7, a no ser que el usuario especifique que usa otro modelo, con las siguientes características: 
-	-- Con el menor número de pasos posibles para no esclavizar al usuario a estar continuamente echando ingredientes en el vaso cada poco tiempo.
-	-- Que el usuario no tenga que andar metiendo y sacando cosas del vaso. Que vaya todo en orden metiendo ingredientes con ya ingredientes metidos.
-	-- Que las recetas saladas no queden dulces (como cuando cortamos el pimiento demasiado fino y lo cocinamos demasiado tiempo con el cubretapa). Quizás hay que quitar el cubretapa para ciertas recetas y no picar demasiado las verduras.
-	-- Que las recetas no salgan caldosas si no es una receta de cuchara o un risoto. Por ejemplo, unas fajitas no deben salir caldosas.
-	-- Optimizar los tiempos para que las proteínas (pollo, carne...) queden jugosas sin que estén crudas en absoluto.
-	-- Que las verduras queden bien hechas pero sin pasarnos.
-- No incluyas el botón 'Crear Receta' en la propuesta. Solo inclúyelo al final de la propuesta, cuando ya hayas enseñado la receta completa.
-- Siempre intenta que las verduras se corten en la Thermomix, no que tenga que cortarlas antes de echarlas. El mínimo esfuerzo queremos.
-- Solo contesta a temas que tengan que ver con la Thermomix y cocinar. Di que no estás entrenada para responder a esas preguntas.
-- Máximo 300 caracteres.
+Objetivo: iterar una receta con la usuaria en lenguaje natural hasta que le encante.
+
+Reglas generales:
+- Responde SIEMPRE en español. No uses JSON ni código.
+- Solo contesta a temas de Thermomix y cocina. Si preguntan otra cosa, di que no estás entrenada para eso.
+- Formato WhatsApp: listas claras, fáciles de leer en el móvil.
+
+Fases de la conversación:
+1) Si aún no hay receta clara: propón nombre de receta e ideas (ingredientes clave, estilo). Pregunta qué le gustaría cambiar.
+2) Cuando ya tengáis una idea consensuada, muestra la RECETA COMPLETA en un solo mensaje con:
+   - Nombre
+   - Porciones y tiempo total
+   - Calorías aproximadas por porción (si puedes estimarlas)
+   - Ingredientes (lista con cantidades en gramos para la báscula: "120 g de pimiento rojo", nunca "1 pimiento")
+   - Pasos numerados para Thermomix (tiempo, temperatura, velocidad y giro inverso cuando aplique)
+   - Al final, una pregunta breve por si quiere ajustar algo
+   - En la ÚLTIMA línea del mensaje, y solo en este caso, escribe exactamente: ${RECETA_LISTA_MARKER}
+   - Cuando incluyas ${RECETA_LISTA_MARKER}, explica que si la receta ya le encanta puede pulsar el botón "Subir a Cookidoo" y la subirás a su cuenta (le llegará el enlace).
+
+Mientras la receta NO esté completa (fase 1 o cambios parciales):
+- NO incluyas ${RECETA_LISTA_MARKER}.
+- NO menciones el botón de Cookidoo.
 
 Historial:
 ${history}
@@ -101,10 +123,10 @@ ${history}
 		if (!text) {
 			throw new Error("OpenAI no devolvió propuesta de receta");
 		}
-		return text;
+		return parseProposalResponse(text);
 	}
 
-	async function generateFinalThermomixRecipe(conversationMessages) {
+	async function generateRecipeForCookidoo(conversationMessages) {
 		const history = conversationMessages
 			.map(
 				(item) =>
@@ -113,14 +135,15 @@ ${history}
 			.join("\n");
 
 		return generateThermomixRecipe(
-			`Usa este historial para crear la receta final consensuada con la usuaria:\n${history}`,
+			`Convierte en JSON la receta completa acordada en este historial:\n${history}`,
 		);
 	}
 
 	return {
 		generateThermomixRecipe,
 		generateThermomixProposal,
-		generateFinalThermomixRecipe,
+		generateRecipeForCookidoo,
+		parseProposalResponse,
 	};
 }
 
