@@ -15,6 +15,7 @@ const {
 	resolveTmModeChip,
 	findCookingAnnotationsInText,
 } = require("../utils/thermomixCookidoo");
+const { validateRecipeForUpload } = require("../utils/validateRecipe");
 
 const COOKIDOO_TOKEN_AUTHORIZATION =
 	"Basic a3VwZmVyd2Vyay1jbGllbnQtbndvdDpMczUwT04xd295U3FzMWRDZEpnZQ==";
@@ -386,10 +387,167 @@ async function patchJson(url, authHeaders, body) {
 	return { ok: response.ok, status: response.status, responseText };
 }
 
+function cleanCookidooInstructions(instructions) {
+	return (Array.isArray(instructions) ? instructions : [])
+		.filter((s) => s?.type === "STEP" || s?.text)
+		.map((step) => {
+			const out = {
+				type: "STEP",
+				text: String(step.text || "").trim() || "paso",
+			};
+			if (Array.isArray(step.annotations) && step.annotations.length > 0) {
+				out.annotations = step.annotations;
+			}
+			return out;
+		});
+}
+
+function cleanCookidooIngredients(ingredients) {
+	return (Array.isArray(ingredients) ? ingredients : [])
+		.filter((i) => i?.text || i?.type === "INGREDIENT")
+		.map((item) => {
+			const row = { type: "INGREDIENT", text: String(item.text || "").trim() };
+			if (item.localId) {
+				row.localId = item.localId;
+			}
+			return row;
+		})
+		.filter((i) => i.text);
+}
+
+/**
+ * Sube JSON Cookidoo casi tal cual (sin pasar por formato Mimi).
+ * @param {{ content: object, meta?: object }} native
+ */
+async function uploadCookidooNativeToAccount(native, credentialsPath) {
+	const content = native?.content;
+	if (!content) {
+		throw new Error("Falta recipeContent en el JSON de Cookidoo");
+	}
+
+	const ingredients = cleanCookidooIngredients(content.ingredients);
+	const instructions = cleanCookidooInstructions(content.instructions);
+	if (ingredients.length === 0) {
+		throw new Error("El JSON de Cookidoo no tiene ingredientes");
+	}
+	if (instructions.length === 0) {
+		throw new Error("El JSON de Cookidoo no tiene pasos");
+	}
+
+	const creds = await loadCookidooCredentials(credentialsPath);
+	const accessToken = await cookidooRequestToken(creds);
+	const baseOrigin = new URL(creds.cookidooBaseUrl).origin;
+	const { language } = creds;
+	const apiBase = `https://${creds.countryCode}.tmmobile.vorwerk-digital.com`;
+
+	const title = String(content.name || native?.meta?.name || "Receta").trim();
+	const servings = Number(content.yield?.value) || 4;
+	const totalSeconds = Number(content.totalTime) || 1800;
+	const activeSeconds = Number(content.prepTime) || Math.floor(totalSeconds * 0.35);
+	const cookSeconds = Number(content.cookTime) || totalSeconds - activeSeconds;
+	const hints =
+		typeof content.hints === "string"
+			? content.hints
+			: Array.isArray(content.hints)
+				? content.hints.join("\n\n")
+				: "";
+
+	const authHeaders = {
+		Accept: "application/json",
+		"Content-Type": "application/json",
+		Authorization: `Bearer ${accessToken}`,
+	};
+
+	const createUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}`;
+	const createRes = await fetch(createUrl, {
+		method: "POST",
+		headers: authHeaders,
+		body: JSON.stringify({ recipeName: title }),
+	});
+	const createText = await createRes.text();
+	if (!createRes.ok) {
+		throw new Error(
+			`Cookidoo crear receta HTTP ${createRes.status}: ${createText.slice(0, 400)}`,
+		);
+	}
+	const createJson = JSON.parse(createText);
+	const cookidooRecipeId =
+		createJson.recipeId || createJson.id || createJson.recipe?.recipeId;
+	if (!cookidooRecipeId) {
+		throw new Error("Cookidoo crear receta: no devolvió recipeId");
+	}
+
+	await delay(5000);
+	const patchUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}/${encodeURIComponent(cookidooRecipeId)}`;
+
+	const baseMeta = {
+		name: title,
+		image: content.image ?? null,
+		isImageOwnedByUser: false,
+		tools:
+			Array.isArray(content.tools) && content.tools.length > 0
+				? content.tools
+				: creds.tools,
+		yield: { value: servings, unitText: creds.yieldUnitText },
+		prepTime: activeSeconds,
+		cookTime: cookSeconds,
+		totalTime: totalSeconds,
+		hints: hints || "",
+		workStatus: "PRIVATE",
+		recipeMetadata: { requiresAnnotationsCheck: false },
+	};
+
+	const ingPayload = ingredients.map((row) =>
+		row.localId
+			? { type: "INGREDIENT", localId: row.localId, text: row.text }
+			: { type: "INGREDIENT", text: row.text },
+	);
+
+	let ingRes = await patchJson(patchUrl, authHeaders, {
+		...baseMeta,
+		ingredients: ingPayload,
+	});
+	if (!ingRes.ok && ingRes.status === 400) {
+		ingRes = await patchJson(patchUrl, authHeaders, {
+			...baseMeta,
+			ingredients: ingredients.map((row) => ({
+				type: "INGREDIENT",
+				text: row.text,
+			})),
+		});
+	}
+	if (!ingRes.ok && ingRes.status !== 204) {
+		throw new Error(
+			`Cookidoo ingredientes HTTP ${ingRes.status}: ${ingRes.responseText.slice(0, 500)}`,
+		);
+	}
+
+	await delay(2000);
+	let stepRes = await patchJson(patchUrl, authHeaders, { instructions });
+	if (!stepRes.ok && stepRes.status === 400) {
+		stepRes = await patchJson(patchUrl, authHeaders, {
+			instructions: instructions.map((s) => ({
+				type: "STEP",
+				text: s.text,
+			})),
+		});
+	}
+	if (!stepRes.ok && stepRes.status !== 204) {
+		throw new Error(
+			`Cookidoo pasos HTTP ${stepRes.status}: ${stepRes.responseText.slice(0, 500)}`,
+		);
+	}
+
+	const recipeUrl = `${baseOrigin}/recipes/custom-recipes/${encodeURIComponent(cookidooRecipeId)}`;
+	return { cookidooRecipeId, recipeUrl };
+}
+
 /**
  * @returns {{ cookidooRecipeId: string, recipeUrl: string }}
  */
 async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
+	validateRecipeForUpload(recipe);
+
 	const creds = await loadCookidooCredentials(credentialsPath);
 	const accessToken = await cookidooRequestToken(creds);
 
@@ -523,4 +681,5 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 
 module.exports = {
 	uploadRecipeToCookidooAccount,
+	uploadCookidooNativeToAccount,
 };

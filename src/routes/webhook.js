@@ -13,12 +13,20 @@ const {
 } = require("../store/lastRecipeByUser");
 const { formatRecipeForWhatsApp } = require("../utils/formatRecipeForWhatsApp");
 const { recipeStore } = require("../store/recipeStore");
-const { pushRecipeToCookidooBridge } = require("../services/cookidooBridge");
-const { uploadRecipeToCookidooAccount } = require("../services/cookidooUpload");
+const {
+	uploadRecipeToCookidooAccount,
+	uploadCookidooNativeToAccount,
+} = require("../services/cookidooUpload");
 const {
 	parseCookidooJson,
 	looksLikeCookidooJson,
+	unwrapCookidooPayload,
 } = require("../services/cookidooParse");
+const {
+	validateRecipeForUpload,
+	isStoredRecipeUsable,
+	recipeToUploadPayload,
+} = require("../utils/validateRecipe");
 
 function createWebhookRouter({ config, whatsapp, recipeAi }) {
 	const router = express.Router();
@@ -78,31 +86,6 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				const pendingId = getLastCreatedRecipeId(from);
 				const stored = pendingId ? recipeStore.get(pendingId) : null;
 
-				let recipe;
-				let recipeId = pendingId;
-
-				if (stored?.title && stored?.steps) {
-					const { id, createdAt, source, ...rest } = stored;
-					recipe = rest;
-				} else if (conversation.messages.length > 0) {
-					recipe = await recipeAi.generateRecipeForCookidoo(
-						conversation.messages,
-					);
-					recipeId = randomUUID();
-					recipeStore.set(recipeId, {
-						id: recipeId,
-						createdAt: new Date().toISOString(),
-						...recipe,
-					});
-					setLastCreatedRecipeId(from, recipeId);
-				} else {
-					await whatsapp.sendText(
-						from,
-						"No encuentro la receta a subir. Vuelve a pegar el JSON o consensúa una receta conmigo.",
-					);
-					return;
-				}
-
 				let credentialsOk = false;
 				try {
 					await fs.access(config.cookidooCredentialsPath);
@@ -111,58 +94,70 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 					credentialsOk = false;
 				}
 
-				if (credentialsOk) {
-					try {
-						const { recipeUrl } = await uploadRecipeToCookidooAccount(
+				if (!credentialsOk) {
+					await whatsapp.sendText(
+						from,
+						"Para subir a Cookidoo necesitas cookidoo-credentials.json en el proyecto (copia cookidoo-credentials.example.json) o configurar COOKIDOO_BRIDGE_URL.",
+					);
+					return;
+				}
+
+				try {
+					let recipeUrl;
+					let title;
+
+					if (stored?.cookidooNative?.content) {
+						const result = await uploadCookidooNativeToAccount(
+							stored.cookidooNative,
+							config.cookidooCredentialsPath,
+						);
+						recipeUrl = result.recipeUrl;
+						title =
+							stored.cookidooNative.content.name ||
+							stored.title ||
+							"Receta";
+					} else {
+						let recipe;
+						if (isStoredRecipeUsable(stored)) {
+							recipe = recipeToUploadPayload(stored);
+						} else if (conversation.messages.length > 0) {
+							recipe = await recipeAi.generateRecipeForCookidoo(
+								conversation.messages,
+							);
+							const recipeId = randomUUID();
+							recipeStore.set(recipeId, {
+								id: recipeId,
+								createdAt: new Date().toISOString(),
+								...recipe,
+							});
+							setLastCreatedRecipeId(from, recipeId);
+						} else {
+							await whatsapp.sendText(
+								from,
+								"No encuentro la receta a subir. Vuelve a pegar el JSON o consensúa una receta conmigo.",
+							);
+							return;
+						}
+						validateRecipeForUpload(recipe);
+						const result = await uploadRecipeToCookidooAccount(
 							recipe,
 							config.cookidooCredentialsPath,
 						);
-						await whatsapp.sendText(
-							from,
-							`¡Listo! Tu receta ya está en Cookidoo ✅\n${recipe.title}\n\n${recipeUrl}`,
-						);
-					} catch (cookidooError) {
-						console.error("Cookidoo upload error:", cookidooError);
-						await whatsapp.sendText(
-							from,
-							`No pude subir la receta a Cookidoo: ${cookidooError.message}`,
-						);
+						recipeUrl = result.recipeUrl;
+						title = recipe.title;
 					}
-					return;
-				}
 
-				if (config.cookidooBridgeUrl) {
-					try {
-						const { parsed } = await pushRecipeToCookidooBridge({
-							bridgeUrl: config.cookidooBridgeUrl,
-							bridgeSecret: config.cookidooBridgeSecret,
-							recipe,
-							whatsappFrom: from,
-						});
-						const link =
-							parsed &&
-							typeof parsed === "object" &&
-							(parsed.cookidooRecipeUrl || parsed.url);
-						await whatsapp.sendText(
-							from,
-							link
-								? `Listo: receta enviada al puente Cookidoo.\n${link}`
-								: "Listo: receta enviada al puente Cookidoo.",
-						);
-					} catch (bridgeError) {
-						console.error("Cookidoo bridge error:", bridgeError);
-						await whatsapp.sendText(
-							from,
-							`No pude completar la subida: ${bridgeError.message}`,
-						);
-					}
-					return;
+					await whatsapp.sendText(
+						from,
+						`¡Listo! Tu receta ya está en Cookidoo ✅\n${title}\n\n${recipeUrl}`,
+					);
+				} catch (cookidooError) {
+					console.error("Cookidoo upload error:", cookidooError);
+					await whatsapp.sendText(
+						from,
+						`No pude subir la receta a Cookidoo: ${cookidooError.message}`,
+					);
 				}
-
-				await whatsapp.sendText(
-					from,
-					"Para subir a Cookidoo necesitas cookidoo-credentials.json en el proyecto (copia cookidoo-credentials.example.json) o configurar COOKIDOO_BRIDGE_URL.",
-				);
 				return;
 			}
 
@@ -176,12 +171,14 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 
 			if (looksLikeCookidooJson(userText)) {
 				try {
+					const cookidooNative = unwrapCookidooPayload(userText);
 					const recipe = parseCookidooJson(userText);
 					const recipeId = randomUUID();
 					recipeStore.set(recipeId, {
 						id: recipeId,
 						createdAt: new Date().toISOString(),
 						...recipe,
+						cookidooNative,
 					});
 					setLastCreatedRecipeId(from, recipeId);
 					setRecipeReady(from, true);
@@ -220,12 +217,37 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				throw new Error("La propuesta de receta llegó vacía");
 			}
 
-			setRecipeReady(from, isComplete);
 			pushConversationMessage(from, "assistant", proposal);
 
 			if (isComplete) {
-				await whatsapp.sendUploadToCookidooButton(from, proposal);
+				await whatsapp.sendText(
+					from,
+					"Un momento, preparo la receta para Cookidoo… ⏳",
+				);
+				try {
+					const recipe = await recipeAi.generateRecipeForCookidoo(
+						conversation.messages,
+					);
+					validateRecipeForUpload(recipe);
+					const recipeId = randomUUID();
+					recipeStore.set(recipeId, {
+						id: recipeId,
+						createdAt: new Date().toISOString(),
+						...recipe,
+					});
+					setLastCreatedRecipeId(from, recipeId);
+					setRecipeReady(from, true);
+					await whatsapp.sendUploadToCookidooButton(from, proposal);
+				} catch (prepError) {
+					console.error("Preparar receta Cookidoo:", prepError);
+					setRecipeReady(from, false);
+					await whatsapp.sendText(
+						from,
+						`No pude preparar la receta para subir: ${prepError.message}\n\nSi quieres, ajusta algo y te la vuelvo a mostrar.`,
+					);
+				}
 			} else {
+				setRecipeReady(from, false);
 				await whatsapp.sendText(from, proposal);
 			}
 
