@@ -40,8 +40,12 @@ INGREDIENTES (báscula Thermomix en gramos):
 - Líquidos: convierte ml a gramos aproximados (agua/leche 1 ml ≈ 1 g).
 
 PASOS Y COOKIDOO:
-- "ingredient_indices": índices 0-based de ingredientes que se usan en ese paso. Cada ingrediente en al menos un paso.
-- "text": solo la acción (ej. "Añadir al vaso y programar"). NO repitas tiempos ni temperatura en text.
+- "ingredient_indices": SOLO índices 0-based de ingredientes que se ECHAN o AÑADEN al vaso EN ESE paso concreto.
+  - Si el paso solo cocina, programa, reduce, espesa o remueve lo que ya está en el vaso → "ingredient_indices": [] (array vacío).
+  - Cada ingrediente debe aparecer en exactamente UN paso (el paso donde se añade por primera vez).
+  - NUNCA repitas la lista completa de ingredientes en todos los pasos.
+  - Ejemplo: paso 1 [0,1,2] añadir verduras; paso 2 [] programar 7 min; paso 3 [3] añadir pollo; paso 4 [] cocinar.
+- "text": solo la acción de ESE paso. NO repitas tiempos ni temperatura en text (van en tm_mode).
 - "tm_mode" OBLIGATORIO en todo paso que cocine/mezcle en el vaso. Formato EXACTO con barras:
   "7 min / 100°C / Vel 1 giro inverso"
   "7 min / 100°C / Vel soft giro inverso"

@@ -22,7 +22,7 @@ function createApp() {
 	app.use(express.json());
 
 	app.use("/", createWebhookRouter({ config, whatsapp, recipeAi }));
-	app.use("/r", createRecipeRouter());
+	app.use("/r", createRecipeRouter({ config }));
 
 	return app;
 }

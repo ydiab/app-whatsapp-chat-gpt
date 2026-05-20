@@ -107,10 +107,65 @@ function normalizeForMatch(s) {
 		.trim();
 }
 
-/**
- * Si el modelo no envía ingredient_indices, infiere qué ingrediente va en qué paso
- * por aparición del nombre del ingrediente en el texto del paso.
- */
+const ADD_INGREDIENT_PATTERN =
+	/\b(añad|agreg|ech|incorpor|pon(?:er|ga)|verter|deposite|introduc|mezclar\s+con|juntar)\w*/i;
+
+/** Paso que solo programa/cocina lo que ya hay en el vaso (sin echar ingredientes nuevos). */
+function isCookingOnlyStep(text, tmMode) {
+	const t = String(text || "").trim();
+	if (!t) {
+		return Boolean(tmMode);
+	}
+	if (ADD_INGREDIENT_PATTERN.test(t)) {
+		return false;
+	}
+	return Boolean(tmMode);
+}
+
+function stepAddsIngredients(text) {
+	return ADD_INGREDIENT_PATTERN.test(String(text || ""));
+}
+
+function ingredientMentionedInText(ingredientName, stepText) {
+	const needle = normalizeForMatch(ingredientName);
+	if (needle.length < 2) {
+		return false;
+	}
+	const hay = normalizeForMatch(stepText);
+	const re = new RegExp(
+		`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\w*`,
+		"i",
+	);
+	return re.test(hay) || hay.includes(needle);
+}
+
+function parseIndices(raw, n) {
+	if (!Array.isArray(raw)) {
+		return null;
+	}
+	return [...new Set(raw.map(Number))].filter(
+		(x) => !Number.isNaN(x) && x >= 0 && x < n,
+	);
+}
+
+/** Si casi todos los pasos llevan el mismo listado completo, el modelo lo rellenó mal. */
+function modelIndicesLookBogus(sortedSteps, n) {
+	if (n === 0 || sortedSteps.length < 2) {
+		return false;
+	}
+	const withIndices = sortedSteps.filter(
+		(s) => Array.isArray(s.ingredient_indices) && s.ingredient_indices.length > 0,
+	);
+	if (withIndices.length < Math.ceil(sortedSteps.length * 0.6)) {
+		return false;
+	}
+	const fullSet = new Set([...Array(n).keys()].map(String));
+	return withIndices.every((s) => {
+		const set = new Set(parseIndices(s.ingredient_indices, n).map(String));
+		return set.size === fullSet.size && [...fullSet].every((k) => set.has(k));
+	});
+}
+
 function inferIngredientIndicesPerStep(recipe) {
 	const ingredients = recipe.ingredients || [];
 	const sortedSteps = [...(recipe.steps || [])].sort(
@@ -122,35 +177,26 @@ function inferIngredientIndicesPerStep(recipe) {
 	for (let i = 0; i < n; i++) {
 		const name =
 			ingredients[i].name != null ? String(ingredients[i].name).trim() : "";
-		const needle = normalizeForMatch(name);
-		if (needle.length < 2) continue;
-
-		let bestStep = 0;
+		let bestStep = -1;
 		let bestScore = -1;
+
 		for (let j = 0; j < sortedSteps.length; j++) {
-			const hay = normalizeForMatch(sortedSteps[j].text || "");
-			if (!hay.includes(needle)) continue;
-			const score = needle.length;
+			const stepText = sortedSteps[j].text || "";
+			if (!stepAddsIngredients(stepText)) {
+				continue;
+			}
+			if (!ingredientMentionedInText(name, stepText)) {
+				continue;
+			}
+			const score = normalizeForMatch(name).length;
 			if (score > bestScore) {
 				bestScore = score;
 				bestStep = j;
 			}
 		}
-		if (bestScore >= 0) {
-			perStep[bestStep].add(i);
-		}
-	}
 
-	for (let i = 0; i < n; i++) {
-		let assigned = false;
-		for (const set of perStep) {
-			if (set.has(i)) {
-				assigned = true;
-				break;
-			}
-		}
-		if (!assigned && perStep.length > 0) {
-			perStep[0].add(i);
+		if (bestStep >= 0) {
+			perStep[bestStep].add(i);
 		}
 	}
 
@@ -158,14 +204,60 @@ function inferIngredientIndicesPerStep(recipe) {
 		order: step.order ?? j + 1,
 		text: step.text != null ? String(step.text).trim() : "",
 		tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
-		ingredient_indices:
-			Array.isArray(step.ingredient_indices) &&
-			step.ingredient_indices.length > 0
-				? [...new Set(step.ingredient_indices.map(Number))].filter(
-						(x) => !Number.isNaN(x) && x >= 0 && x < n,
-					)
-				: [...perStep[j]],
+		ingredient_indices: [...perStep[j]],
 	}));
+}
+
+/**
+ * Ajusta ingredient_indices del modelo: pasos solo cocción → [], sin duplicar en todos los pasos.
+ */
+function resolveIngredientIndicesPerStep(recipe) {
+	const ingredients = recipe.ingredients || [];
+	const sortedSteps = [...(recipe.steps || [])].sort(
+		(a, b) => (a.order || 0) - (b.order || 0),
+	);
+	const n = ingredients.length;
+	const useInference =
+		modelIndicesLookBogus(sortedSteps, n) ||
+		sortedSteps.every(
+			(s) =>
+				!Array.isArray(s.ingredient_indices) || s.ingredient_indices.length === 0,
+		);
+
+	let steps = useInference
+		? inferIngredientIndicesPerStep(recipe)
+		: sortedSteps.map((step, j) => ({
+				order: step.order ?? j + 1,
+				text: step.text != null ? String(step.text).trim() : "",
+				tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
+				ingredient_indices:
+					parseIndices(step.ingredient_indices, n) ?? [],
+			}));
+
+	steps = steps.map((step) => {
+		if (isCookingOnlyStep(step.text, step.tm_mode)) {
+			return { ...step, ingredient_indices: [] };
+		}
+		if (step.ingredient_indices.length > 0 && !stepAddsIngredients(step.text)) {
+			return { ...step, ingredient_indices: [] };
+		}
+		return step;
+	});
+
+	const claimed = new Map();
+	for (let j = 0; j < steps.length; j++) {
+		const kept = [];
+		for (const i of steps[j].ingredient_indices) {
+			if (claimed.has(i)) {
+				continue;
+			}
+			claimed.set(i, j);
+			kept.push(i);
+		}
+		steps[j] = { ...steps[j], ingredient_indices: kept };
+	}
+
+	return steps;
 }
 
 function buildIngredientRows(recipe) {
@@ -360,7 +452,7 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 	const patchUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}/${encodeURIComponent(cookidooRecipeId)}`;
 
 	const rows = buildIngredientRows(recipe);
-	const enrichedSteps = inferIngredientIndicesPerStep(recipe);
+	const enrichedSteps = resolveIngredientIndicesPerStep(recipe);
 
 	const baseMeta = {
 		name: title,
