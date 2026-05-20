@@ -208,6 +208,76 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 					return;
 				}
 
+				const isPartial = recipe._partial === true;
+				// Limpiamos campos internos antes de guardar/usar
+				const nativeContent = recipe._cookidooNative || null;
+				delete recipe._cookidooNative;
+				delete recipe._cookidooRecipeId;
+				delete recipe._partial;
+
+				if (isPartial) {
+					// Cookidoo no expone los pasos en su página pública.
+					// Inyectamos los ingredientes y el título en la conversación
+					// para que Mimi genere los pasos adaptados a Thermomix.
+					const ingLines = (recipe.ingredients || [])
+						.map((i) =>
+							[i.quantity, i.name].filter(Boolean).join(" de ").trim(),
+						)
+						.join("\n");
+					const contextMsg =
+						`He encontrado esta receta en Cookidoo: *${recipe.title}*\n` +
+						`(${recipe.servings} raciones, ~${recipe.total_time_min} min)\n\n` +
+						`Ingredientes originales:\n${ingLines}\n\n` +
+						`Adáptala para Thermomix generando los pasos optimizados.`;
+
+					pushConversationMessage(from, "user", contextMsg);
+					const proposalResult =
+						await recipeAi.generateThermomixProposal(
+							getConversation(from).messages,
+						);
+					const proposal =
+						typeof proposalResult === "string"
+							? proposalResult
+							: String(proposalResult?.content ?? "").trim();
+					const isComplete = Boolean(
+						typeof proposalResult === "object" && proposalResult?.isComplete,
+					);
+
+					pushConversationMessage(from, "assistant", proposal);
+
+					if (isComplete) {
+						await whatsapp.sendText(
+							from,
+							"Un momento, preparo la receta para Cookidoo… ⏳",
+						);
+						try {
+							const generatedRecipe =
+								await recipeAi.generateRecipeForCookidoo(
+									getConversation(from).messages,
+								);
+							validateRecipeForUpload(generatedRecipe);
+							const newId = randomUUID();
+							recipeStore.set(newId, {
+								id: newId,
+								createdAt: new Date().toISOString(),
+								...generatedRecipe,
+							});
+							setLastCreatedRecipeId(from, newId);
+							setRecipeReady(from, true);
+							await whatsapp.sendUploadToCookidooButton(from, proposal);
+						} catch (prepError) {
+							console.error("Preparar receta Cookidoo (URL parcial):", prepError);
+							setRecipeReady(from, false);
+							await whatsapp.sendText(from, proposal);
+						}
+					} else {
+						setRecipeReady(from, false);
+						await whatsapp.sendText(from, proposal);
+					}
+					return;
+				}
+
+				// Receta completa (con pasos, p. ej. de la API móvil)
 				try {
 					validateRecipeForUpload(recipe);
 				} catch (validationError) {
@@ -225,12 +295,9 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 					...recipe,
 					importSource: "cookidoo-url",
 				};
-				if (recipe._cookidooNative) {
-					entry.cookidooNative = recipe._cookidooNative;
+				if (nativeContent) {
+					entry.cookidooNative = nativeContent;
 				}
-				// Limpiamos campos internos antes de guardar
-				delete entry._cookidooNative;
-				delete entry._cookidooRecipeId;
 
 				recipeStore.set(recipeId2, entry);
 				setLastCreatedRecipeId(from, recipeId2);
