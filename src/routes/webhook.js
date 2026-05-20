@@ -20,9 +20,12 @@ const {
 const {
 	parseCookidooJson,
 	looksLikeRecipeJson,
+	looksLikeCookidooUrl,
+	extractRecipeIdFromUrl,
 	unwrapCookidooPayload,
 	isCookidooApiContent,
 } = require("../services/cookidooParse");
+const { fetchCookidooRecipe } = require("../services/cookidooFetch");
 const {
 	validateRecipeForUpload,
 	isStoredRecipeUsable,
@@ -167,6 +170,79 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 					from,
 					"Cuéntame qué quieres cocinar y lo vamos afinando juntas. Cuando te enseñe la receta completa, podrás subirla a Cookidoo.",
 				);
+				return;
+			}
+
+			if (looksLikeCookidooUrl(userText)) {
+				const recipeId = extractRecipeIdFromUrl(userText);
+				await whatsapp.sendText(
+					from,
+					`Buscando la receta en Cookidoo… ⏳`,
+				);
+
+				let credentialsOk = false;
+				try {
+					await fs.access(config.cookidooCredentialsPath);
+					credentialsOk = true;
+				} catch {
+					credentialsOk = false;
+				}
+
+				if (!credentialsOk) {
+					await whatsapp.sendText(
+						from,
+						"Necesito las credenciales de Cookidoo para obtener la receta. Añade cookidoo-credentials.json al proyecto.",
+					);
+					return;
+				}
+
+				let recipe;
+				try {
+					recipe = await fetchCookidooRecipe(recipeId, config.cookidooCredentialsPath);
+				} catch (fetchError) {
+					console.error("Cookidoo fetch error:", fetchError);
+					await whatsapp.sendText(
+						from,
+						`No pude obtener la receta de Cookidoo: ${fetchError.message}`,
+					);
+					return;
+				}
+
+				try {
+					validateRecipeForUpload(recipe);
+				} catch (validationError) {
+					await whatsapp.sendText(
+						from,
+						`La receta de Cookidoo no tiene suficiente contenido: ${validationError.message}`,
+					);
+					return;
+				}
+
+				const recipeId2 = randomUUID();
+				const entry = {
+					id: recipeId2,
+					createdAt: new Date().toISOString(),
+					...recipe,
+					importSource: "cookidoo-url",
+				};
+				if (recipe._cookidooNative) {
+					entry.cookidooNative = recipe._cookidooNative;
+				}
+				// Limpiamos campos internos antes de guardar
+				delete entry._cookidooNative;
+				delete entry._cookidooRecipeId;
+
+				recipeStore.set(recipeId2, entry);
+				setLastCreatedRecipeId(from, recipeId2);
+				setRecipeReady(from, true);
+
+				const summary = formatRecipeForWhatsApp(recipe);
+				const intro = `Aquí tienes la receta de Cookidoo *${recipe.title}*.\n\nSi quieres cambiar algo (ingredientes, porciones, sin gluten…) dímelo y la adapto. Si te gusta tal cual, pulsa *Subir a Cookidoo*.\n\n${summary}`;
+
+				pushConversationMessage(from, "user", `[URL Cookidoo: ${recipeId}]`);
+				pushConversationMessage(from, "assistant", summary);
+
+				await whatsapp.sendUploadToCookidooButton(from, intro);
 				return;
 			}
 

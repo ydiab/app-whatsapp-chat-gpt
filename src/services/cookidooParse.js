@@ -488,10 +488,36 @@ function looksLikeRecipeJson(text) {
 	);
 }
 
+// Detecta URLs de Cookidoo (cookidoo.es, cookidoo.co.uk, cookidoo.com, etc.)
+// Las URLs tienen el recipe ID al final: …/r000012345  o  …/r000012345?…
+const COOKIDOO_URL_RE =
+	/https?:\/\/cookidoo\.[a-z.]+\/[^\s]*?\/(r\d{4,})\b/i;
+
+/**
+ * @param {string} text
+ * @returns {boolean}
+ */
+function looksLikeCookidooUrl(text) {
+	return COOKIDOO_URL_RE.test(String(text || "").trim());
+}
+
+/**
+ * Extrae el recipe ID (p. ej. "r000011988") de una URL de Cookidoo.
+ * @param {string} text
+ * @returns {string|null}
+ */
+function extractRecipeIdFromUrl(text) {
+	const m = COOKIDOO_URL_RE.exec(String(text || ""));
+	return m ? m[1] : null;
+}
+
 module.exports = {
 	parseCookidooJson,
+	parseCookidooApiContent,
 	looksLikeCookidooJson: looksLikeRecipeJson,
 	looksLikeRecipeJson,
+	looksLikeCookidooUrl,
+	extractRecipeIdFromUrl,
 	unwrapCookidooPayload,
 	isCookidooApiContent,
 };

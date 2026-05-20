@@ -716,4 +716,6 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 module.exports = {
 	uploadRecipeToCookidooAccount,
 	uploadCookidooNativeToAccount,
+	loadCookidooCredentials,
+	cookidooRequestToken,
 };
