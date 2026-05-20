@@ -14,6 +14,8 @@ const {
 	formatIngredientLine,
 	resolveTmModeChip,
 	findCookingAnnotationsInText,
+	buildCookidooNativeChip,
+	findIngredientLocationInText,
 } = require("../utils/thermomixCookidoo");
 const { validateRecipeForUpload } = require("../utils/validateRecipe");
 
@@ -278,35 +280,19 @@ function buildIngredientRows(recipe) {
 }
 
 /**
- * Anotaciones INGREDIENT alineadas con substring exacto en `text` (offset/length).
- * @param {string} text
- * @param {string[]} lines
- * @returns {object[]}
- */
-function buildIngredientAnnotations(text, lines) {
-	const annotations = [];
-	let searchStart = 0;
-	for (const line of lines) {
-		if (!line) continue;
-		const offset = text.indexOf(line, searchStart);
-		if (offset < 0) continue;
-		annotations.push({
-			type: "INGREDIENT",
-			data: {
-				description: line,
-				notes: [],
-			},
-			position: { offset, length: line.length },
-		});
-		searchStart = offset + line.length;
-	}
-	annotations.sort((a, b) => a.position.offset - b.position.offset);
-	return annotations;
-}
-
-/**
+ * Construye un paso en el formato que usa Cookidoo en recetas oficiales:
+ *  - texto natural mencionando los ingredientes (sin la lista pegada al inicio)
+ *  - INGREDIENT annotations sobre cada nombre de ingrediente del texto (negrita/enlace)
+ *  - chip de cocción en formato nativo ("8 min/120°C//vel ." con doble barra para
+ *    giro inverso e icono cuchara) al final del paso
+ *  - TTS / MODE annotation sobre ese chip (icono de giro y de velocidad)
+ *
+ * Si algún ingrediente asignado al paso NO aparece en el texto, se prepende una
+ * frase "Añadir 6 g de aceite, 140 g de pechuga de pollo. " para conservar el
+ * enlace, manteniendo un tono natural.
+ *
  * @param {{ text: string, tm_mode?: string, ingredient_indices?: number[] }} step
- * @param {{ text: string, localId: string }[]} rows
+ * @param {{ text: string, localId: string, name: string }[]} rows
  * @param {{ withAnnotations?: boolean }} opts
  */
 function buildStepInstruction(step, rows, opts = {}) {
@@ -314,26 +300,63 @@ function buildStepInstruction(step, rows, opts = {}) {
 	const indices = [...new Set(step.ingredient_indices || [])]
 		.filter((i) => i >= 0 && i < rows.length)
 		.sort((a, b) => a - b);
-	const lines = indices.map((i) => rows[i].text).filter(Boolean);
+
 	const body = step.text ? String(step.text).trim() : "";
-	const tmChip = resolveTmModeChip(step);
+	const userChip = resolveTmModeChip(step);
 
-	const textParts = [];
-	if (lines.length > 0) {
-		textParts.push(lines.join("\n"));
+	let chipAnnotationTemplate = null;
+	let nativeChip = null;
+	if (userChip) {
+		const found = findCookingAnnotationsInText(userChip);
+		if (found.length > 0) {
+			chipAnnotationTemplate = found[0];
+			nativeChip = buildCookidooNativeChip(chipAnnotationTemplate);
+		}
 	}
-	if (body) {
-		textParts.push(body);
-	}
-	if (tmChip) {
-		textParts.push(tmChip);
-	}
-	const text = textParts.join("\n\n") || "paso";
 
-	const instruction = {
-		type: "STEP",
-		text,
-	};
+	const placed = [];
+	const missing = [];
+	for (const idx of indices) {
+		const row = rows[idx];
+		const loc = body
+			? findIngredientLocationInText(row.name, body)
+			: null;
+		if (loc) {
+			placed.push({ idx, row, offset: loc.offset, length: loc.length });
+		} else {
+			missing.push({ idx, row });
+		}
+	}
+
+	let prefix = "";
+	const prefixAnns = [];
+	if (missing.length > 0) {
+		const startWord = "Añadir ";
+		let cursor = startWord.length;
+		let prefixBody = startWord;
+		for (let k = 0; k < missing.length; k++) {
+			const line = missing[k].row.text;
+			prefixAnns.push({
+				idx: missing[k].idx,
+				offset: cursor,
+				length: line.length,
+			});
+			prefixBody += line;
+			cursor += line.length;
+			if (k < missing.length - 1) {
+				prefixBody += ", ";
+				cursor += 2;
+			}
+		}
+		prefixBody += body ? ". " : ".";
+		prefix = prefixBody;
+	}
+
+	const textBody = prefix + body;
+	const chipSep = nativeChip && textBody ? " " : "";
+	const text = (textBody + chipSep + (nativeChip || "")).trim() || "paso";
+
+	const instruction = { type: "STEP", text };
 
 	if (!withAnnotations) {
 		return instruction;
@@ -341,36 +364,47 @@ function buildStepInstruction(step, rows, opts = {}) {
 
 	const annotations = [];
 
-	if (lines.length > 0) {
-		const ing = buildIngredientAnnotations(text, lines);
-		if (ing.length === lines.length) {
-			annotations.push(...ing);
-		}
+	for (const pa of prefixAnns) {
+		annotations.push({
+			type: "INGREDIENT",
+			position: { offset: pa.offset, length: pa.length },
+			data: {
+				description: {
+					text: rows[pa.idx].text,
+					annotations: [],
+				},
+			},
+		});
 	}
 
-	if (tmChip) {
-		const cooking = findCookingAnnotationsInText(text);
-		const match = cooking.find(
-			(a) =>
-				text.slice(a.position.offset, a.position.offset + a.position.length) ===
-				tmChip,
-		);
-		if (match) {
-			annotations.push(match);
-		} else {
-			const offset = text.indexOf(tmChip);
-			const fallback = findCookingAnnotationsInText(tmChip)[0];
-			if (offset >= 0 && fallback) {
-				annotations.push({
-					...fallback,
-					position: { offset, length: tmChip.length },
-				});
-			}
-		}
+	const prefixLen = prefix.length;
+	for (const p of placed) {
+		annotations.push({
+			type: "INGREDIENT",
+			position: {
+				offset: prefixLen + p.offset,
+				length: p.length,
+			},
+			data: {
+				description: {
+					text: p.row.text,
+					annotations: [],
+				},
+			},
+		});
 	}
 
+	if (chipAnnotationTemplate && nativeChip) {
+		const chipOffset = textBody.length + chipSep.length;
+		const { position: _ignored, ...rest } = chipAnnotationTemplate;
+		annotations.push({
+			...rest,
+			position: { offset: chipOffset, length: nativeChip.length },
+		});
+	}
+
+	annotations.sort((a, b) => a.position.offset - b.position.offset);
 	if (annotations.length > 0) {
-		annotations.sort((a, b) => a.position.offset - b.position.offset);
 		instruction.annotations = annotations;
 	}
 

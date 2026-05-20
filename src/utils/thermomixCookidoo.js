@@ -81,7 +81,6 @@ function buildModeRegexes() {
 			`(\\d+(?:[-–]\\d+)?)\\s*(${t})\\s*\\/\\s*${sp}\\s*(${speedToken})`,
 			"gi",
 		),
-		browning: new RegExp(GRAMMAR_ES.browningTrigger, "i"),
 	};
 }
 
@@ -286,12 +285,136 @@ function resolveTmModeChip(step) {
 	return normalizeTmModeChip(combined);
 }
 
+/**
+ * Convierte una anotación TTS/MODE (devuelta por findCookingAnnotationsInText)
+ * en un chip con el formato nativo que usa Cookidoo en sus recetas oficiales:
+ *   "4 seg/vel 4"            (sin temperatura, CW)
+ *   "8 min/120°C/vel 4"      (con temperatura, CW)
+ *   "8 min/120°C//vel ."     (con temperatura, giro inverso, velocidad cuchara)
+ *   "15 min/Varoma/vel 1"    (steaming)
+ * El doble slash (`//`) antes de `vel` marca el giro inverso y `.` se renderiza
+ * como icono de cuchara en la app.
+ * @param {object|null} annotation
+ * @returns {string|null}
+ */
+function buildCookidooNativeChip(annotation) {
+	if (!annotation) return null;
+	const data = annotation.data || {};
+	const time = data.time;
+	if (!time || time <= 0) return null;
+
+	let timeStr;
+	if (time < 60) {
+		timeStr = `${time} seg`;
+	} else if (time % 60 === 0) {
+		timeStr = `${time / 60} min`;
+	} else {
+		timeStr = `${Math.round(time / 60)} min`;
+	}
+
+	let middlePart = "";
+	if (annotation.type === "MODE" && annotation.name === "steaming") {
+		middlePart = "/Varoma";
+	} else if (data.temperature?.value) {
+		middlePart = `/${data.temperature.value}°C`;
+	}
+
+	const separator = data.direction === "CCW" ? "//" : "/";
+	const speedStr = data.speed === "soft" ? "." : String(data.speed || "1");
+
+	return `${timeStr}${middlePart}${separator}vel ${speedStr}`;
+}
+
+/**
+ * Convierte un chip user-friendly ("7 min / 100°C / Vel soft giro inverso")
+ * directamente al formato nativo Cookidoo ("7 min/100°C//vel .").
+ * @param {string|null} userChip
+ * @returns {string|null}
+ */
+function userChipToCookidooNative(userChip) {
+	if (!userChip) return null;
+	const annotations = findCookingAnnotationsInText(String(userChip));
+	if (annotations.length === 0) return null;
+	return buildCookidooNativeChip(annotations[0]);
+}
+
+const ACCENT_REGEX_MAP = {
+	a: "[aá]",
+	e: "[eé]",
+	i: "[ií]",
+	o: "[oó]",
+	u: "[uúü]",
+	n: "[nñ]",
+};
+
+function buildAccentInsensitivePattern(str) {
+	return String(str)
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/\p{M}/gu, "")
+		.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+		.replace(/[aeioun]/g, (c) => ACCENT_REGEX_MAP[c] || c)
+		.replace(/\s+/g, "\\s+");
+}
+
+/**
+ * Busca dónde aparece (insensible a tildes y mayúsculas) el nombre de un
+ * ingrediente en un texto. Prueba el nombre completo y, si no aparece, prefijos
+ * progresivamente más cortos (y por último la palabra final como fallback).
+ * @param {string} name
+ * @param {string} text
+ * @returns {{ offset: number, length: number }|null}
+ */
+function findIngredientLocationInText(name, text) {
+	const trimmed = String(name || "").trim();
+	const haystack = String(text || "");
+	if (!trimmed || !haystack) return null;
+
+	const words = trimmed.split(/\s+/);
+	const candidates = [];
+	const seen = new Set();
+	const push = (value) => {
+		const v = value.trim();
+		if (v.length < 3) return;
+		if (seen.has(v.toLowerCase())) return;
+		seen.add(v.toLowerCase());
+		candidates.push(v);
+	};
+
+	for (let len = words.length; len >= 1; len--) {
+		push(words.slice(0, len).join(" "));
+	}
+	if (words.length > 1) {
+		push(words[words.length - 1]);
+	}
+
+	for (const candidate of candidates) {
+		try {
+			const re = new RegExp(
+				`\\b${buildAccentInsensitivePattern(candidate)}\\b`,
+				"i",
+			);
+			const m = re.exec(haystack);
+			if (m?.[0]) {
+				return { offset: m.index, length: m[0].length };
+			}
+		} catch {
+			// patrón inválido — saltar candidato
+		}
+	}
+
+	return null;
+}
+
 module.exports = {
 	formatIngredientLine,
 	normalizeQuantityToGrams,
 	normalizeTmModeChip,
 	resolveTmModeChip,
 	findCookingAnnotationsInText,
+	buildCookidooNativeChip,
+	userChipToCookidooNative,
+	findIngredientLocationInText,
 	/** @deprecated use findCookingAnnotationsInText */
 	findModeAnnotationsInText: findCookingAnnotationsInText,
 };

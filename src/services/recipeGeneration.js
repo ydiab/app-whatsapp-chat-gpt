@@ -45,7 +45,11 @@ PASOS Y COOKIDOO:
   - Cada ingrediente debe aparecer en exactamente UN paso (el paso donde se añade por primera vez).
   - NUNCA repitas la lista completa de ingredientes en todos los pasos.
   - Ejemplo: paso 1 [0,1,2] añadir verduras; paso 2 [] programar 7 min; paso 3 [3] añadir pollo; paso 4 [] cocinar.
-- "text": solo la acción de ESE paso. NO repitas tiempos ni temperatura en text (van en tm_mode).
+- "text": redáctalo como una receta de Cookidoo oficial, en lenguaje natural y mencionando por su nombre los ingredientes que se añaden en ESE paso (sin cantidades; las cantidades van en la lista de ingredientes y Cookidoo las enlazará). Ejemplos:
+   - "Añadir el aceite y la pechuga de pollo en dados y sofreír."
+   - "Incorporar la cebolla, el pimiento rojo y el ajo. Trocear."
+   - "Programar sin medidor."
+  NO pegues la lista de ingredientes al inicio del paso. NO repitas tiempos ni temperatura en text (van en tm_mode). Si el paso solo cocina/programa/reposa, no menciones ingredientes.
 - "tm_mode" OBLIGATORIO en todo paso que cocine/mezcle en el vaso. Formato EXACTO con barras:
   "7 min / 100°C / Vel 1 giro inverso"
   "7 min / 100°C / Vel soft giro inverso"
