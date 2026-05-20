@@ -1,7 +1,8 @@
 /**
- * Convierte JSON de receta Cookidoo (GET created-recipes, export) al formato interno
- * usado por cookidooUpload / recipeStore.
+ * Convierte JSON de receta al formato interno (Mimi / export / API Cookidoo).
  */
+
+const { normalizeTmModeChip } = require("../utils/thermomixCookidoo");
 
 function normalizeLine(s) {
 	return String(s)
@@ -21,7 +22,7 @@ function unwrapCookidooPayload(input) {
 		input = JSON.parse(jsonText);
 	}
 	if (!input || typeof input !== "object") {
-		throw new Error("JSON de Cookidoo inválido");
+		throw new Error("JSON de receta inválido");
 	}
 	if (input.recipeContent && typeof input.recipeContent === "object") {
 		return {
@@ -29,12 +30,121 @@ function unwrapCookidooPayload(input) {
 			content: input.recipeContent,
 		};
 	}
-	if (input.ingredients || input.instructions) {
-		return { meta: {}, content: input };
+	if (input.ingredients || input.instructions || input.steps) {
+		return { meta: input, content: input };
 	}
 	throw new Error(
-		"No reconozco el JSON: falta recipeContent o ingredients/instructions",
+		"No reconozco el JSON: falta recipeContent, ingredients o steps",
 	);
+}
+
+/** JSON devuelto por la API Cookidoo (ingredientes con .text o type INGREDIENT). */
+function isCookidooApiContent(content) {
+	const ing = content?.ingredients;
+	if (!Array.isArray(ing) || ing.length === 0) {
+		return false;
+	}
+	return ing.some(
+		(i) => i?.type === "INGREDIENT" || typeof i?.text === "string",
+	);
+}
+
+/** JSON exportado por Mimi / asistente (name + quantity numérico + steps[].instruction). */
+function isMimiExportContent(content) {
+	const ing = content?.ingredients;
+	if (!Array.isArray(ing) || ing.length === 0) {
+		return false;
+	}
+	return ing.some(
+		(i) => i?.name != null && (i?.quantity != null || i?.unit != null),
+	);
+}
+
+function parseIsoDuration(value) {
+	const s = String(value || "");
+	const m = s.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i);
+	if (!m) {
+		return null;
+	}
+	const h = Number(m[1] || 0);
+	const min = Number(m[2] || 0);
+	const sec = Number(m[3] || 0);
+	return h * 3600 + min * 60 + sec;
+}
+
+function parseYieldToServings(yieldValue) {
+	if (yieldValue == null) {
+		return 4;
+	}
+	if (typeof yieldValue === "object" && yieldValue.value != null) {
+		return Number(yieldValue.value) || 4;
+	}
+	const m = String(yieldValue).match(/(\d+)/);
+	return m ? Number(m[1]) : 4;
+}
+
+function parseExportIngredient(item) {
+	const name = String(item.name || "").trim();
+	const unit = String(item.unit || "g").trim().toLowerCase();
+	const q = item.quantity;
+
+	if (!name) {
+		return { name: "", quantity: "" };
+	}
+	if (unit === "pizca" || unit === "pizcas") {
+		return { name, quantity: "1 pizca" };
+	}
+	if (q != null && q !== "") {
+		return { name, quantity: `${q} ${unit}`.trim() };
+	}
+	return { name, quantity: "" };
+}
+
+/**
+ * Separa texto del paso y chip Thermomix (ej. "6 min/120°C/vel cuchara").
+ */
+function splitInstructionAndTm(instruction) {
+	const full = String(instruction || "").trim();
+	if (!full) {
+		return { text: "", tm_mode: "" };
+	}
+
+	const patterns = [
+		/\d+\s*min(?:utos?)?\s*\/\s*\d+\s*°\s*C(?:\s*\/\s*)?(?:giro\s*inverso(?:\s*\/\s*)?)?(?:vel(?:ocidad)?\.?\s*)?(?:cuchara|soft|[\d.,]+)/gi,
+		/\d+\s*seg(?:undos?)?\s*\/\s*vel(?:ocidad)?\.?\s*[\d.,]+/gi,
+		/\d+\s*s\s*\/\s*vel(?:ocidad)?\.?\s*[\d.,]+/gi,
+	];
+
+	let chipRaw = null;
+	for (const re of patterns) {
+		const matches = [...full.matchAll(re)];
+		if (matches.length > 0) {
+			chipRaw = matches[matches.length - 1][0];
+		}
+	}
+
+	if (!chipRaw) {
+		return { text: full, tm_mode: "" };
+	}
+
+	const tm_mode =
+		normalizeTmModeChip(chipRaw.replace(/\//g, " / ")) || chipRaw;
+	let text = full.replace(chipRaw, "").trim();
+	text = text.replace(/\s*\.\s*Retire y reserve\.?\s*$/i, "").trim();
+
+	return { text, tm_mode };
+}
+
+function inferIngredientIndicesForStep(stepText, ingredients) {
+	const indices = [];
+	const hay = normalizeLine(stepText);
+	for (let i = 0; i < ingredients.length; i++) {
+		const name = normalizeLine(ingredients[i].name);
+		if (name.length >= 3 && hay.includes(name)) {
+			indices.push(i);
+		}
+	}
+	return [...new Set(indices)].sort((a, b) => a - b);
 }
 
 function ingredientDescriptionFromAnnotation(ann) {
@@ -95,7 +205,11 @@ function findIngredientIndex(line, ingredients) {
 			normalizeLine(`${ing.quantity} ${ing.name}`),
 			normalizeLine(ing.name),
 		];
-		if (variants.some((v) => v && (needle === v || needle.includes(v) || v.includes(needle)))) {
+		if (
+			variants.some(
+				(v) => v && (needle === v || needle.includes(v) || v.includes(needle)),
+			)
+		) {
 			return i;
 		}
 	}
@@ -116,9 +230,6 @@ function formatTimePart(seconds) {
 	return `${Math.max(1, Math.round(s / 60))} min`;
 }
 
-/**
- * Reconstruye chip tipo "7 min / 100°C / Vel 2 giro inverso" desde anotación TTS/MODE.
- */
 function cookingDataToChip(annotation, textSlice) {
 	if (textSlice) {
 		return textSlice;
@@ -137,7 +248,11 @@ function cookingDataToChip(annotation, textSlice) {
 		return parts.join(" / ");
 	}
 
-	if (annotation?.type === "MODE" && name === "browning" && data.temperature?.value) {
+	if (
+		annotation?.type === "MODE" &&
+		name === "browning" &&
+		data.temperature?.value
+	) {
 		const parts = [];
 		const t = formatTimePart(data.time);
 		if (t) parts.push(t);
@@ -155,13 +270,15 @@ function cookingDataToChip(annotation, textSlice) {
 		parts.push("Varoma");
 	}
 	const speed =
-		data.speed === "soft" || data.speed === "cuchara" ? "soft" : data.speed || "1";
+		data.speed === "soft" || data.speed === "cuchara"
+			? "soft"
+			: data.speed || "1";
 	const rev = data.direction === "CCW" ? " giro inverso" : "";
 	parts.push(`Vel ${speed}${rev}`);
 	return parts.filter(Boolean).join(" / ");
 }
 
-function parseCookidooStep(step, ingredients) {
+function parseCookidooApiStep(step, ingredients) {
 	const text = step?.text != null ? String(step.text) : "";
 	const annotations = Array.isArray(step?.annotations) ? step.annotations : [];
 
@@ -217,26 +334,72 @@ function parseCookidooStep(step, ingredients) {
 	};
 }
 
-function parseHints(hints) {
-	if (typeof hints === "string") {
-		return hints.trim();
-	}
-	if (Array.isArray(hints)) {
-		return hints
-			.map((h) => (typeof h === "string" ? h : h?.text))
-			.filter(Boolean)
-			.join("\n\n");
-	}
-	return "";
+function parseMimiExportContent(meta, content) {
+	const ingredients = (content.ingredients || [])
+		.map(parseExportIngredient)
+		.filter((i) => i.name);
+
+	const rawSteps = content.steps || content.instructions || [];
+	const steps = rawSteps.map((step, index) => {
+		const instruction =
+			step.instruction ?? step.text ?? step.description ?? "";
+		const { text, tm_mode } = splitInstructionAndTm(instruction);
+		const stepText = text || String(step.name || "").trim() || instruction;
+		let indices = inferIngredientIndicesForStep(
+			`${stepText} ${step.name || ""}`,
+			ingredients,
+		);
+		if (indices.length === 0 && !tm_mode) {
+			indices = inferIngredientIndicesForStep(instruction, ingredients);
+		}
+
+		return {
+			order: step.order ?? index + 1,
+			text: stepText,
+			tm_mode,
+			ingredient_indices: indices,
+		};
+	});
+
+	const totalSec =
+		parseIsoDuration(content.totalTime) ||
+		parseIsoDuration(meta.totalTime) ||
+		0;
+	const prepSec =
+		parseIsoDuration(content.preparationTime) ||
+		parseIsoDuration(content.prepTime) ||
+		0;
+	const total_time_min =
+		totalSec > 0
+			? Math.max(1, Math.round(totalSec / 60))
+			: prepSec > 0
+				? Math.max(1, Math.round(prepSec / 60))
+				: 30;
+
+	const servings = parseYieldToServings(content.yield ?? meta.yield);
+	const nutrition = content.nutrition;
+	const nutrition_notes = nutrition
+		? `~${nutrition.caloriesPerServing ?? "?"} kcal/porción · P ${nutrition.protein ?? "?"} · G ${nutrition.fat ?? "?"} · HC ${nutrition.carbohydrates ?? "?"}`
+		: "";
+
+	return {
+		title: String(content.name || meta.name || "Receta importada").trim(),
+		description: String(content.description || meta.description || "").trim(),
+		difficulty: "media",
+		total_time_min,
+		servings,
+		ingredients,
+		steps,
+		tags: Array.isArray(content.tags) ? content.tags : ["importada"],
+		nutrition_notes,
+		source: {
+			format: "mimi-export",
+			importedAt: new Date().toISOString(),
+		},
+	};
 }
 
-/**
- * @param {string|object} input JSON string u objeto Cookidoo
- * @returns {object} Receta formato interno
- */
-function parseCookidooJson(input) {
-	const { meta, content } = unwrapCookidooPayload(input);
-
+function parseCookidooApiContent(meta, content) {
 	const ingredients = parseIngredientsList(content.ingredients);
 	const instructions = Array.isArray(content.instructions)
 		? content.instructions
@@ -245,7 +408,7 @@ function parseCookidooJson(input) {
 	const steps = instructions
 		.filter((s) => s?.type === "STEP" || s?.text)
 		.map((step, index) => {
-			const parsed = parseCookidooStep(step, ingredients);
+			const parsed = parseCookidooApiStep(step, ingredients);
 			return {
 				order: index + 1,
 				...parsed,
@@ -262,11 +425,16 @@ function parseCookidooJson(input) {
 				: 30;
 
 	const servings = Number(content.yield?.value ?? meta.yield?.value) || 4;
-	const hints = parseHints(content.hints ?? meta.hints);
+	const hints =
+		typeof content.hints === "string"
+			? content.hints
+			: Array.isArray(content.hints)
+				? content.hints.join("\n\n")
+				: "";
 
 	return {
 		title: String(content.name || meta.name || "Receta importada").trim(),
-		description: hints || "",
+		description: hints || String(content.description || "").trim(),
 		difficulty: "media",
 		total_time_min,
 		servings,
@@ -275,26 +443,46 @@ function parseCookidooJson(input) {
 		tags: ["importada-cookidoo"],
 		nutrition_notes: "",
 		source: {
+			format: "cookidoo-api",
 			cookidooRecipeId: meta.recipeId || null,
 			importedAt: new Date().toISOString(),
 		},
 	};
 }
 
-function looksLikeCookidooJson(text) {
+/**
+ * @param {string|object} input
+ * @returns {object}
+ */
+function parseCookidooJson(input) {
+	const { meta, content } = unwrapCookidooPayload(input);
+
+	if (isCookidooApiContent(content)) {
+		return parseCookidooApiContent(meta, content);
+	}
+	if (isMimiExportContent(content) || Array.isArray(content.steps)) {
+		return parseMimiExportContent(meta, content);
+	}
+	return parseCookidooApiContent(meta, content);
+}
+
+function looksLikeRecipeJson(text) {
 	const t = String(text || "").trim();
 	if (!t.startsWith("{")) {
 		return false;
 	}
 	return (
 		t.includes("recipeContent") ||
+		t.includes('"ingredients"') ||
 		t.includes('"instructions"') ||
-		t.includes('"ingredients"')
+		t.includes('"steps"')
 	);
 }
 
 module.exports = {
 	parseCookidooJson,
-	looksLikeCookidooJson,
+	looksLikeCookidooJson: looksLikeRecipeJson,
+	looksLikeRecipeJson,
 	unwrapCookidooPayload,
+	isCookidooApiContent,
 };

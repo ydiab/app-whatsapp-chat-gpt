@@ -19,8 +19,9 @@ const {
 } = require("../services/cookidooUpload");
 const {
 	parseCookidooJson,
-	looksLikeCookidooJson,
+	looksLikeRecipeJson,
 	unwrapCookidooPayload,
+	isCookidooApiContent,
 } = require("../services/cookidooParse");
 const {
 	validateRecipeForUpload,
@@ -169,35 +170,73 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				return;
 			}
 
-			if (looksLikeCookidooJson(userText)) {
-				try {
-					const cookidooNative = unwrapCookidooPayload(userText);
-					const recipe = parseCookidooJson(userText);
-					const recipeId = randomUUID();
-					recipeStore.set(recipeId, {
-						id: recipeId,
-						createdAt: new Date().toISOString(),
-						...recipe,
-						cookidooNative,
-					});
-					setLastCreatedRecipeId(from, recipeId);
-					setRecipeReady(from, true);
+			if (looksLikeRecipeJson(userText)) {
+				let recipe;
+				let nativeContent = null;
+				let importSource = "parser";
 
-					const summary = formatRecipeForWhatsApp(recipe);
-					pushConversationMessage(
-						from,
-						"user",
-						`[JSON Cookidoo importado: ${recipe.title}]`,
+				try {
+					const unwrapped = unwrapCookidooPayload(userText);
+					recipe = parseCookidooJson(userText);
+					if (isCookidooApiContent(unwrapped.content)) {
+						nativeContent = unwrapped;
+					}
+				} catch (parserError) {
+					console.warn(
+						"Parser determinista no reconoció el JSON, probando con OpenAI:",
+						parserError.message,
 					);
-					pushConversationMessage(from, "assistant", summary);
-					await whatsapp.sendUploadToCookidooButton(from, summary);
-				} catch (importError) {
-					console.error("Cookidoo JSON import:", importError);
 					await whatsapp.sendText(
 						from,
-						`No pude importar ese JSON de Cookidoo: ${importError.message}`,
+						"Ese formato no lo reconozco directamente, dame un momento que lo analice… ⏳",
 					);
+					try {
+						recipe = await recipeAi.normalizeRecipeFromRawText(userText);
+						validateRecipeForUpload(recipe);
+						importSource = "openai-fallback";
+					} catch (aiError) {
+						console.error("Fallback OpenAI también falló:", aiError);
+						await whatsapp.sendText(
+							from,
+							`No pude importar esa receta: ${aiError.message}`,
+						);
+						return;
+					}
 				}
+
+				try {
+					validateRecipeForUpload(recipe);
+				} catch (validationError) {
+					console.error("Validación tras parseo:", validationError);
+					await whatsapp.sendText(
+						from,
+						`No pude usar esa receta: ${validationError.message}`,
+					);
+					return;
+				}
+
+				const recipeId = randomUUID();
+				const entry = {
+					id: recipeId,
+					createdAt: new Date().toISOString(),
+					...recipe,
+					importSource,
+				};
+				if (nativeContent) {
+					entry.cookidooNative = nativeContent;
+				}
+				recipeStore.set(recipeId, entry);
+				setLastCreatedRecipeId(from, recipeId);
+				setRecipeReady(from, true);
+
+				const summary = formatRecipeForWhatsApp(recipe);
+				pushConversationMessage(
+					from,
+					"user",
+					`[Receta importada: ${recipe.title}]`,
+				);
+				pushConversationMessage(from, "assistant", summary);
+				await whatsapp.sendUploadToCookidooButton(from, summary);
 				return;
 			}
 

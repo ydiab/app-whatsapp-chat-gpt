@@ -143,10 +143,30 @@ ${history}
 		);
 	}
 
+	/**
+	 * Fallback: pide a OpenAI que normalice texto/JSON arbitrario al formato interno.
+	 * @param {string} rawText texto pegado por el usuario (JSON desconocido, texto libre, etc.)
+	 */
+	async function normalizeRecipeFromRawText(rawText) {
+		return generateThermomixRecipe(
+			`Te paso una receta en un formato que no reconozco (puede ser JSON, texto plano o copia de una web).
+Conviértela al esquema JSON pedido SIN inventar ingredientes ni cantidades:
+- Respeta cantidades exactas (140 g sigue siendo 140 g, no redondees).
+- Si la unidad es ml o l, conviértela a gramos aproximados solo para agua/leche/caldo (1:1).
+- "pizca", "unidad", "cucharada" etc. → mantenlos en quantity si no hay peso (ej. "1 pizca").
+- Si un paso indica tiempo/temperatura/velocidad (ej. "8 min/100°C/vel cuchara"), ponlo en "tm_mode" y deja en "text" solo la acción.
+- Si un paso solo cocina (sin añadir nada al vaso) → ingredient_indices: [].
+
+Texto recibido:
+${rawText.slice(0, 6000)}`,
+		);
+	}
+
 	return {
 		generateThermomixRecipe,
 		generateThermomixProposal,
 		generateRecipeForCookidoo,
+		normalizeRecipeFromRawText,
 		parseProposalResponse,
 	};
 }
