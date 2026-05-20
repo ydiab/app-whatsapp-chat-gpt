@@ -139,10 +139,19 @@ function inferIngredientIndicesForStep(stepText, ingredients) {
 	const indices = [];
 	const hay = normalizeLine(stepText);
 	for (let i = 0; i < ingredients.length; i++) {
-		const name = normalizeLine(ingredients[i].name);
-		if (name.length >= 3 && hay.includes(name)) {
-			indices.push(i);
+		const fullName = normalizeLine(ingredients[i].name);
+		if (fullName.length < 3) continue;
+		// Prueba el nombre completo primero, luego prefijos progresivamente
+		// más cortos (p. ej. "esparragos trigueros" → "esparragos").
+		const words = fullName.split(/\s+/);
+		let matched = false;
+		for (let len = words.length; len >= 1 && !matched; len--) {
+			const candidate = words.slice(0, len).join(" ");
+			if (candidate.length >= 3 && hay.includes(candidate)) {
+				matched = true;
+			}
 		}
+		if (matched) indices.push(i);
 	}
 	return [...new Set(indices)].sort((a, b) => a - b);
 }
