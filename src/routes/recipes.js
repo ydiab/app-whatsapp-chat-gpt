@@ -49,6 +49,7 @@ function createRecipeRouter({ config } = {}) {
 				await uploadRecipeToCookidooAccount(
 					recipe,
 					config.cookidooCredentialsPath,
+					config.cookidooCookiesPath,
 				);
 
 			return res.json({

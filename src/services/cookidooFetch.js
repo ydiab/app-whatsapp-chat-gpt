@@ -8,10 +8,8 @@
  *     __NEXT_DATA__ (Next.js SSR) o de los JSON-LD <script> de la página.
  */
 
-const {
-	loadCookidooCredentials,
-	cookidooRequestToken,
-} = require("./cookidooUpload");
+const { loadCookidooCredentials } = require("./cookidooUpload");
+const { buildCookidooSession } = require("./cookidooAuth");
 const { parseCookidooApiContent } = require("./cookidooParse");
 
 // ─── helpers de scraping ─────────────────────────────────────────────────────
@@ -77,14 +75,13 @@ function extractFromHtml(html) {
 
 // ─── API fetch ────────────────────────────────────────────────────────────────
 
-async function tryApiFetch(recipeId, creds, accessToken) {
-	const apiBase = `https://${creds.countryCode}.tmmobile.vorwerk-digital.com`;
+async function tryApiFetch(recipeId, apiBase, authHeaders, language) {
 	for (const version of ["v3", "v2"]) {
-		const url = `${apiBase}/recipes/${version}/${encodeURIComponent(recipeId)}?locale=${encodeURIComponent(creds.language)}`;
+		const url = `${apiBase}/recipes/${version}/${encodeURIComponent(recipeId)}?locale=${encodeURIComponent(language)}`;
 		const res = await fetch(url, {
 			headers: {
 				Accept: "application/json",
-				Authorization: `Bearer ${accessToken}`,
+				Cookie: authHeaders.Cookie,
 			},
 		});
 		if (res.ok) {
@@ -101,7 +98,7 @@ async function tryApiFetch(recipeId, creds, accessToken) {
 
 // ─── web scrape fallback ──────────────────────────────────────────────────────
 
-async function tryWebScrape(recipeId, creds) {
+async function tryWebScrape(recipeId, creds, cookieHeader) {
 	// Construct the canonical recipe URL
 	const webUrl = `${creds.cookidooBaseUrl}/recipes/recipe/${creds.language}/${recipeId}`;
 	let res;
@@ -112,6 +109,7 @@ async function tryWebScrape(recipeId, creds) {
 					"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 				"Accept-Language": `${creds.language},es;q=0.9`,
 				Accept: "text/html,application/xhtml+xml",
+				...(cookieHeader ? { Cookie: cookieHeader } : {}),
 			},
 			redirect: "follow",
 		});
@@ -232,32 +230,51 @@ function normalizeSchemaDotOrg(data) {
  * Descarga y parsea al formato interno la receta indicada.
  * @param {string} recipeId  p. ej. "r379830"
  * @param {string} credentialsPath
+ * @param {string} [cookiesPath]
  * @returns {Promise<object>}  receta en formato interno Mimi
  */
-async function fetchCookidooRecipe(recipeId, credentialsPath) {
+async function fetchCookidooRecipe(recipeId, credentialsPath, cookiesPath) {
 	const creds = await loadCookidooCredentials(credentialsPath);
 
-	// 1. Intenta la API móvil (requiere token, funciona con recetas del usuario y
-	//    algunas recetas del catálogo)
-	let accessToken;
-	let rawApi = null;
+	// Construye la sesión por cookies del navegador. Si no hay cookies
+	// válidas, seguimos sin ellas (el scraping de páginas públicas puede bastar).
+	let apiBase = null;
+	let authHeaders = null;
+	let cookieHeader = "";
 	try {
-		accessToken = await cookidooRequestToken(creds);
-		rawApi = await tryApiFetch(recipeId, creds, accessToken);
+		const session = await buildCookidooSession(creds, cookiesPath);
+		apiBase = session.apiBase;
+		authHeaders = session.authHeaders;
+		cookieHeader = session.authHeaders.Cookie;
 	} catch (authErr) {
-		console.warn("Cookidoo auth/API falló, intentando scraping web:", authErr.message);
+		console.warn(
+			"Sin sesión de Cookidoo, intentaré solo scraping público:",
+			authErr.message,
+		);
 	}
 
-	if (rawApi) {
-		const recipe = normalizeRawData(rawApi, rawApi);
-		recipe._cookidooNative = { meta: rawApi, content: rawApi?.recipeContent ?? rawApi };
-		recipe._cookidooRecipeId = recipeId;
-		return recipe;
+	// 1. Con sesión: intenta la API (recetas del usuario y del catálogo).
+	if (apiBase && authHeaders) {
+		let rawApi = null;
+		try {
+			rawApi = await tryApiFetch(recipeId, apiBase, authHeaders, creds.language);
+		} catch (apiErr) {
+			console.warn("Cookidoo API falló, intentando scraping web:", apiErr.message);
+		}
+		if (rawApi) {
+			const recipe = normalizeRawData(rawApi, rawApi);
+			recipe._cookidooNative = {
+				meta: rawApi,
+				content: rawApi?.recipeContent ?? rawApi,
+			};
+			recipe._cookidooRecipeId = recipeId;
+			return recipe;
+		}
 	}
 
-	// 2. Fallback: rasca la página web pública
-	console.log(`API devolvió 404 para ${recipeId}, intentando scraping web…`);
-	const scraped = await tryWebScrape(recipeId, creds);
+	// 2. Fallback: rasca la página web (con cookies si las hay).
+	console.log(`Intentando scraping web para ${recipeId}…`);
+	const scraped = await tryWebScrape(recipeId, creds, cookieHeader);
 	const recipe = normalizeRawData(null, scraped);
 	recipe._cookidooRecipeId = recipeId;
 	return recipe;

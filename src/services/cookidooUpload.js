@@ -1,10 +1,9 @@
 /**
  * Subida directa a Cookidoo (no API pública oficial).
- * Ingredientes en lista + pasos con el mismo texto de cada línea al inicio del paso
- * y annotations tipo INGREDIENT con position { offset, length } sobre step.text
- * (contrato documentado en @recode-software/cookidoo-api).
- * CREATE/PATCH contra el API móvil *.tmmobile.vorwerk-digital.com; el enlace web
- * de la receta sigue usando cookidooBaseUrl del JSON de credenciales.
+ * Ingredientes en lista + pasos con annotations tipo INGREDIENT con
+ * position { offset, length } sobre step.text.
+ * Autenticación por COOKIES de sesión (ver cookidooAuth.js); CREATE/PATCH contra
+ * https://cookidoo.{tld} (las rutas son las mismas que las del antiguo API móvil).
  */
 
 const fs = require("node:fs/promises");
@@ -18,9 +17,7 @@ const {
 	findIngredientLocationInText,
 } = require("../utils/thermomixCookidoo");
 const { validateRecipeForUpload } = require("../utils/validateRecipe");
-
-const COOKIDOO_TOKEN_AUTHORIZATION =
-	"Basic a3VwZmVyd2Vyay1jbGllbnQtbndvdDpMczUwT04xd295U3FzMWRDZEpnZQ==";
+const { buildCookidooSession } = require("./cookidooAuth");
 
 function delay(ms) {
 	return new Promise((resolve) => {
@@ -32,13 +29,9 @@ async function loadCookidooCredentials(credentialsPath) {
 	const resolved = path.resolve(credentialsPath);
 	const raw = await fs.readFile(resolved, "utf8");
 	const data = JSON.parse(raw);
-	for (const key of [
-		"email",
-		"password",
-		"countryCode",
-		"cookidooBaseUrl",
-		"language",
-	]) {
+	// email/password ya no son necesarios: la sesión se obtiene por cookies
+	// (cookies del navegador). Solo necesitamos la config del país/idioma.
+	for (const key of ["countryCode", "cookidooBaseUrl", "language"]) {
 		if (!data[key]) {
 			throw new Error(`Falta el campo "${key}" en ${resolved}`);
 		}
@@ -49,8 +42,6 @@ async function loadCookidooCredentials(credentialsPath) {
 			: String(data.yieldUnitText);
 
 	return {
-		email: String(data.email),
-		password: String(data.password),
 		countryCode: String(data.countryCode).toLowerCase(),
 		cookidooBaseUrl: String(data.cookidooBaseUrl).replace(/\/$/, ""),
 		language: String(data.language),
@@ -60,45 +51,6 @@ async function loadCookidooCredentials(credentialsPath) {
 				: ["TM7", "TM6"],
 		yieldUnitText,
 	};
-}
-
-async function cookidooRequestToken(creds) {
-	const tokenUrl = `https://${creds.countryCode}.tmmobile.vorwerk-digital.com/ciam/auth/token`;
-	const body = new URLSearchParams({
-		grant_type: "password",
-		username: creds.email,
-		password: creds.password,
-	});
-
-	const response = await fetch(tokenUrl, {
-		method: "POST",
-		headers: {
-			Accept: "application/json",
-			"Content-Type": "application/x-www-form-urlencoded",
-			Authorization: COOKIDOO_TOKEN_AUTHORIZATION,
-		},
-		body,
-	});
-
-	const text = await response.text();
-	if (!response.ok) {
-		throw new Error(
-			`Cookidoo login HTTP ${response.status}: ${text.slice(0, 280)}`,
-		);
-	}
-
-	let data;
-	try {
-		data = JSON.parse(text);
-	} catch {
-		throw new Error("Cookidoo login: respuesta no JSON");
-	}
-
-	if (!data.access_token) {
-		throw new Error("Cookidoo login: no access_token en la respuesta");
-	}
-
-	return data.access_token;
 }
 
 function normalizeForMatch(s) {
@@ -452,8 +404,10 @@ function cleanCookidooIngredients(ingredients) {
 /**
  * Sube JSON Cookidoo casi tal cual (sin pasar por formato Mimi).
  * @param {{ content: object, meta?: object }} native
+ * @param {string} credentialsPath
+ * @param {string} [cookiesPath]
  */
-async function uploadCookidooNativeToAccount(native, credentialsPath) {
+async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPath) {
 	const content = native?.content;
 	if (!content) {
 		throw new Error("Falta recipeContent en el JSON de Cookidoo");
@@ -469,10 +423,11 @@ async function uploadCookidooNativeToAccount(native, credentialsPath) {
 	}
 
 	const creds = await loadCookidooCredentials(credentialsPath);
-	const accessToken = await cookidooRequestToken(creds);
-	const baseOrigin = new URL(creds.cookidooBaseUrl).origin;
+	const { apiBase, baseOrigin, authHeaders } = await buildCookidooSession(
+		creds,
+		cookiesPath,
+	);
 	const { language } = creds;
-	const apiBase = `https://${creds.countryCode}.tmmobile.vorwerk-digital.com`;
 
 	const title = String(content.name || native?.meta?.name || "Receta").trim();
 	const servings = Number(content.yield?.value) || 4;
@@ -485,12 +440,6 @@ async function uploadCookidooNativeToAccount(native, credentialsPath) {
 			: Array.isArray(content.hints)
 				? content.hints.join("\n\n")
 				: "";
-
-	const authHeaders = {
-		Accept: "application/json",
-		"Content-Type": "application/json",
-		Authorization: `Bearer ${accessToken}`,
-	};
 
 	const createUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}`;
 	const createRes = await fetch(createUrl, {
@@ -579,15 +528,15 @@ async function uploadCookidooNativeToAccount(native, credentialsPath) {
 /**
  * @returns {{ cookidooRecipeId: string, recipeUrl: string }}
  */
-async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
+async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPath) {
 	validateRecipeForUpload(recipe);
 
 	const creds = await loadCookidooCredentials(credentialsPath);
-	const accessToken = await cookidooRequestToken(creds);
-
-	const baseOrigin = new URL(creds.cookidooBaseUrl).origin;
+	const { apiBase, baseOrigin, authHeaders } = await buildCookidooSession(
+		creds,
+		cookiesPath,
+	);
 	const { language } = creds;
-	const apiBase = `https://${creds.countryCode}.tmmobile.vorwerk-digital.com`;
 
 	const title = recipe.title || "Receta";
 	const servings = Number(recipe.servings) || 4;
@@ -603,12 +552,6 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath) {
 	if (recipe.description) hintParts.push(String(recipe.description));
 	if (recipe.nutrition_notes) hintParts.push(String(recipe.nutrition_notes));
 	const hints = hintParts.join("\n\n");
-
-	const authHeaders = {
-		Accept: "application/json",
-		"Content-Type": "application/json",
-		Authorization: `Bearer ${accessToken}`,
-	};
 
 	const createUrl = `${apiBase}/created-recipes/${encodeURIComponent(language)}`;
 	const createRes = await fetch(createUrl, {
@@ -717,5 +660,4 @@ module.exports = {
 	uploadRecipeToCookidooAccount,
 	uploadCookidooNativeToAccount,
 	loadCookidooCredentials,
-	cookidooRequestToken,
 };

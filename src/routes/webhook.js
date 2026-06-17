@@ -93,6 +93,13 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				let credentialsOk = false;
 				try {
 					await fs.access(config.cookidooCredentialsPath);
+					const hasCookieEnv = Boolean(
+						process.env.COOKIDOO_COOKIE_HEADER?.trim() ||
+							process.env.COOKIDOO_COOKIES_JSON?.trim(),
+					);
+					if (!hasCookieEnv) {
+						await fs.access(config.cookidooCookiesPath);
+					}
 					credentialsOk = true;
 				} catch {
 					credentialsOk = false;
@@ -101,7 +108,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				if (!credentialsOk) {
 					await whatsapp.sendText(
 						from,
-						"Para subir a Cookidoo necesitas cookidoo-credentials.json en el proyecto (copia cookidoo-credentials.example.json) o configurar COOKIDOO_BRIDGE_URL.",
+						"Para subir a Cookidoo falta la sesión. Copia tus cookies de cookidoo.es (DevTools → Application → Cookies) y ponlas en la variable de entorno COOKIDOO_COOKIE_HEADER (en Render).",
 					);
 					return;
 				}
@@ -114,6 +121,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 						const result = await uploadCookidooNativeToAccount(
 							stored.cookidooNative,
 							config.cookidooCredentialsPath,
+							config.cookidooCookiesPath,
 						);
 						recipeUrl = result.recipeUrl;
 						title =
@@ -146,6 +154,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 						const result = await uploadRecipeToCookidooAccount(
 							recipe,
 							config.cookidooCredentialsPath,
+							config.cookidooCookiesPath,
 						);
 						recipeUrl = result.recipeUrl;
 						title = recipe.title;
@@ -198,7 +207,11 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 
 				let recipe;
 				try {
-					recipe = await fetchCookidooRecipe(recipeId, config.cookidooCredentialsPath);
+					recipe = await fetchCookidooRecipe(
+						recipeId,
+						config.cookidooCredentialsPath,
+						config.cookidooCookiesPath,
+					);
 				} catch (fetchError) {
 					console.error("Cookidoo fetch error:", fetchError);
 					await whatsapp.sendText(

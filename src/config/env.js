@@ -15,10 +15,14 @@ function getConfig() {
 		cookidooBridgeUrl: process.env.COOKIDOO_BRIDGE_URL || "",
 		/** Optional Bearer token your bridge checks (Authorization header). */
 		cookidooBridgeSecret: process.env.COOKIDOO_BRIDGE_SECRET || "",
-		/** JSON file with Cookidoo email/password (see cookidoo-credentials.example.json). */
+		/** JSON file with Cookidoo config (country/language/tools). */
 		cookidooCredentialsPath:
 			process.env.COOKIDOO_CREDENTIALS_PATH ||
 			path.join(process.cwd(), "cookidoo-credentials.json"),
+		/** Local JSON file with Cookidoo session cookies (alternativa a COOKIDOO_COOKIE_HEADER / COOKIDOO_COOKIES_JSON). */
+		cookidooCookiesPath:
+			process.env.COOKIDOO_COOKIES_PATH ||
+			path.join(process.cwd(), "cookidoo-cookies.json"),
 	};
 }
 
