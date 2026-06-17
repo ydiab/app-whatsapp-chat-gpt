@@ -36,20 +36,47 @@ function createWhatsAppService({ whatsappToken, phoneNumberId }) {
 		return String(body ?? "").trim();
 	}
 
+	// WhatsApp limita el cuerpo de texto a 4096 caracteres. Partimos en trozos
+	// (preferentemente por saltos de línea) para no cortar la receta a medias.
+	const MAX_TEXT_LENGTH = 3900;
+
+	function splitIntoChunks(text, max = MAX_TEXT_LENGTH) {
+		const chunks = [];
+		let remaining = text;
+		while (remaining.length > max) {
+			let cut = remaining.lastIndexOf("\n", max);
+			if (cut < max * 0.5) {
+				cut = remaining.lastIndexOf(" ", max);
+			}
+			if (cut < max * 0.5) {
+				cut = max;
+			}
+			chunks.push(remaining.slice(0, cut).trim());
+			remaining = remaining.slice(cut).trim();
+		}
+		if (remaining) {
+			chunks.push(remaining);
+		}
+		return chunks;
+	}
+
 	async function sendText(to, body) {
 		const text = normalizeBody(body);
 		if (!text) {
 			throw new Error("WhatsApp sendText: body vacío");
 		}
-		await apiRequest(
-			{
-				messaging_product: "whatsapp",
-				to,
-				type: "text",
-				text: { body: text },
-			},
-			"sendText",
-		);
+		const chunks = splitIntoChunks(text);
+		for (const chunk of chunks) {
+			await apiRequest(
+				{
+					messaging_product: "whatsapp",
+					to,
+					type: "text",
+					text: { body: chunk },
+				},
+				"sendText",
+			);
+		}
 	}
 
 	async function sendTypingIndicator(messageId) {
@@ -70,13 +97,18 @@ function createWhatsAppService({ whatsappToken, phoneNumberId }) {
 		}
 	}
 
-	async function sendUploadToCookidooButton(to, bodyText) {
-		const text = normalizeBody(bodyText);
-		if (!text) {
-			throw new Error("WhatsApp sendUploadToCookidooButton: body vacío");
+	async function sendUploadToCookidooButton(to, bodyText, promptText) {
+		const full = normalizeBody(bodyText);
+		// Mandamos la receta completa como mensajes de texto (sin recortar),
+		// porque el cuerpo del botón interactivo está limitado a 1024 caracteres.
+		if (full) {
+			await sendText(to, full);
 		}
-		const body =
-			text.length > 1024 ? `${text.slice(0, 1021)}...` : text;
+
+		const prompt =
+			(promptText && String(promptText).trim()) ||
+			"Si la receta te gusta, pulsa «Subir a Cookidoo» 👇";
+
 		await apiRequest(
 			{
 				messaging_product: "whatsapp",
@@ -84,7 +116,7 @@ function createWhatsAppService({ whatsappToken, phoneNumberId }) {
 				type: "interactive",
 				interactive: {
 					type: "button",
-					body: { text: body },
+					body: { text: prompt },
 					action: {
 						buttons: [
 							{
