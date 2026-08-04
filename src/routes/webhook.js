@@ -229,21 +229,50 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				delete recipe._partial;
 
 				if (isPartial) {
-					// Cookidoo no expone los pasos en su página pública.
-					// Inyectamos los ingredientes y el título en la conversación
-					// para que Mimi genere los pasos adaptados a Thermomix.
+					// Cookidoo no expone los pasos en su página pública: solo tenemos
+					// título, ingredientes y tiempos. Guardamos la receta original como
+					// contexto y NO la modificamos por iniciativa propia.
 					const ingLines = (recipe.ingredients || [])
 						.map((i) =>
 							[i.quantity, i.name].filter(Boolean).join(" de ").trim(),
 						)
 						.join("\n");
-					const contextMsg =
-						`He encontrado esta receta en Cookidoo: *${recipe.title}*\n` +
-						`(${recipe.servings} raciones, ~${recipe.total_time_min} min)\n\n` +
-						`Ingredientes originales:\n${ingLines}\n\n` +
-						`Adáptala para Thermomix generando los pasos optimizados.`;
 
-					pushConversationMessage(from, "user", contextMsg);
+					// ¿La usuaria mandó el link junto con una instrucción de adaptación?
+					const extraInstruction = userText
+						.replace(/https?:\/\/\S+/g, "")
+						.trim();
+
+					const referenceMsg =
+						`Receta de Cookidoo que quiero subir: ${recipe.title} ` +
+						`(${recipe.servings} raciones, ~${recipe.total_time_min} min).\n` +
+						`Ingredientes originales:\n${ingLines}\n\n` +
+						`IMPORTANTE: respeta EXACTAMENTE estos ingredientes y cantidades. ` +
+						`Conviértela a formato Thermomix (pasos) SIN cambiar nada ni "mejorarla", ` +
+						`salvo que la usuaria pida una adaptación concreta (calorías, raciones, sin gluten, etc.).`;
+					pushConversationMessage(from, "user", referenceMsg);
+
+					if (!extraInstruction) {
+						// Sin instrucción: enseñamos la receta y preguntamos qué quiere.
+						setRecipeReady(from, false);
+						const ask =
+							`He encontrado *${recipe.title}* en Cookidoo 🧾\n` +
+							`(${recipe.servings} raciones · ~${recipe.total_time_min} min)\n\n` +
+							`Ingredientes:\n${ingLines}\n\n` +
+							`¿Cómo la quieres?\n` +
+							`• *Tal cual*: la paso a pasos de Thermomix respetando las cantidades.\n` +
+							`• *Adaptada*: dime el cambio (por ejemplo "bájale calorías", "para 2 raciones" o "sin gluten") y te la ajusto.`;
+						pushConversationMessage(from, "assistant", ask);
+						await whatsapp.sendText(from, ask);
+						return;
+					}
+
+					// La usuaria mandó el link + una adaptación → la aplicamos.
+					pushConversationMessage(
+						from,
+						"user",
+						`Adaptación que quiero: ${extraInstruction}`,
+					);
 					const proposalResult =
 						await recipeAi.generateThermomixProposal(
 							getConversation(from).messages,
