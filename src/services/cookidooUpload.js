@@ -17,7 +17,11 @@ const {
 	findIngredientLocationInText,
 } = require("../utils/thermomixCookidoo");
 const { validateRecipeForUpload } = require("../utils/validateRecipe");
-const { buildCookidooSession } = require("./cookidooAuth");
+const {
+	buildCookidooSession,
+	SESSION_EXPIRED_MESSAGE,
+	isAuthError,
+} = require("./cookidooAuth");
 
 function delay(ms) {
 	return new Promise((resolve) => {
@@ -449,6 +453,9 @@ async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPat
 	});
 	const createText = await createRes.text();
 	if (!createRes.ok) {
+		if (isAuthError(createRes.status)) {
+			throw new Error(SESSION_EXPIRED_MESSAGE);
+		}
 		throw new Error(
 			`Cookidoo crear receta HTTP ${createRes.status}: ${createText.slice(0, 400)}`,
 		);
@@ -500,6 +507,9 @@ async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPat
 		});
 	}
 	if (!ingRes.ok && ingRes.status !== 204) {
+		if (isAuthError(ingRes.status)) {
+			throw new Error(SESSION_EXPIRED_MESSAGE);
+		}
 		throw new Error(
 			`Cookidoo ingredientes HTTP ${ingRes.status}: ${ingRes.responseText.slice(0, 500)}`,
 		);
@@ -516,6 +526,9 @@ async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPat
 		});
 	}
 	if (!stepRes.ok && stepRes.status !== 204) {
+		if (isAuthError(stepRes.status)) {
+			throw new Error(SESSION_EXPIRED_MESSAGE);
+		}
 		throw new Error(
 			`Cookidoo pasos HTTP ${stepRes.status}: ${stepRes.responseText.slice(0, 500)}`,
 		);
@@ -562,6 +575,9 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPat
 
 	const createText = await createRes.text();
 	if (!createRes.ok) {
+		if (isAuthError(createRes.status)) {
+			throw new Error(SESSION_EXPIRED_MESSAGE);
+		}
 		throw new Error(
 			`Cookidoo crear receta HTTP ${createRes.status}: ${createText.slice(0, 400)}`,
 		);
@@ -627,6 +643,9 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPat
 	}
 
 	if (!ingRes.ok && ingRes.status !== 204) {
+		if (isAuthError(ingRes.status)) {
+			throw new Error(SESSION_EXPIRED_MESSAGE);
+		}
 		throw new Error(
 			`Cookidoo ingredientes HTTP ${ingRes.status}: ${ingRes.responseText.slice(0, 500)}`,
 		);
@@ -647,6 +666,9 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPat
 	}
 
 	if (!stepRes.ok && stepRes.status !== 204) {
+		if (isAuthError(stepRes.status)) {
+			throw new Error(SESSION_EXPIRED_MESSAGE);
+		}
 		throw new Error(
 			`Cookidoo pasos HTTP ${stepRes.status}: ${stepRes.responseText.slice(0, 500)}`,
 		);

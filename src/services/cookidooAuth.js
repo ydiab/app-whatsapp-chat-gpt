@@ -29,6 +29,23 @@ const LOGIN_HINT =
 	"En Render, crea la variable de entorno COOKIDOO_COOKIE_HEADER con la cadena de cookies de cookidoo.es (DevTools → Application → Cookies), p. ej. `_oauth2_proxy=...; v-authenticated=...; v-is-authenticated=true`.";
 
 /**
+ * Mensaje amigable cuando Cookidoo rechaza la sesión (401/403). Las cookies del
+ * navegador (sobre todo _oauth2_proxy) caducan a menudo, así que este caso es
+ * habitual y conviene explicarlo con claridad al usuario.
+ */
+const SESSION_EXPIRED_MESSAGE =
+	"Tu sesión de Cookidoo ha caducado o no es válida. Vuelve a entrar en cookidoo.es, copia de nuevo las cookies (DevTools → Application → Cookies) y actualiza la variable COOKIDOO_COOKIE_HEADER en Render.";
+
+/**
+ * ¿Es un estado HTTP que indica sesión inválida/caducada?
+ * @param {number} status
+ * @returns {boolean}
+ */
+function isAuthError(status) {
+	return status === 401 || status === 403;
+}
+
+/**
  * Parsea una cadena de cabecera Cookie ("a=1; b=2") en array de {name, value}.
  * @param {string} header
  * @returns {{ name: string, value: string }[]}
@@ -59,7 +76,9 @@ function parseCookieHeaderString(header) {
 function normalizeCookiesInput(raw, origin) {
 	const text = String(raw || "").trim();
 	if (!text) {
-		throw new Error(`La sesión de Cookidoo (${origin}) está vacía. ${LOGIN_HINT}`);
+		throw new Error(
+			`La sesión de Cookidoo (${origin}) está vacía. ${LOGIN_HINT}`,
+		);
 	}
 
 	let cookies = null;
@@ -80,7 +99,9 @@ function normalizeCookiesInput(raw, origin) {
 	}
 
 	if (!Array.isArray(cookies) || cookies.length === 0) {
-		throw new Error(`La sesión de Cookidoo (${origin}) no tiene cookies. ${LOGIN_HINT}`);
+		throw new Error(
+			`La sesión de Cookidoo (${origin}) no tiene cookies. ${LOGIN_HINT}`,
+		);
 	}
 
 	const sessionCookie = cookies.find((c) => c.name === SESSION_COOKIE);
@@ -99,7 +120,10 @@ function normalizeCookiesInput(raw, origin) {
 			typeof c.expires === "number" &&
 			c.expires > 0,
 	);
-	if (datedSession.length > 0 && datedSession.every((c) => c.expires < nowSec)) {
+	if (
+		datedSession.length > 0 &&
+		datedSession.every((c) => c.expires < nowSec)
+	) {
 		throw new Error(`La sesión de Cookidoo caducó. ${LOGIN_HINT}`);
 	}
 
@@ -173,4 +197,6 @@ module.exports = {
 	buildCookidooSession,
 	resolveCookiesPath,
 	SESSION_COOKIE,
+	SESSION_EXPIRED_MESSAGE,
+	isAuthError,
 };
