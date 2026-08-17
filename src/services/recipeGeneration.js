@@ -91,7 +91,10 @@ ${userPrompt}
 		}
 	}
 
-	async function generateThermomixProposal(conversationMessages) {
+	async function generateThermomixProposal(
+		conversationMessages,
+		{ channel = "whatsapp" } = {},
+	) {
 		const history = conversationMessages
 			.map(
 				(item) =>
@@ -99,15 +102,23 @@ ${userPrompt}
 			)
 			.join("\n");
 
+		const isApp = channel === "app";
+		const channelName = isApp
+			? "en una app de chat para iPhone"
+			: "por WhatsApp";
+		const formatRule = isApp
+			? "Formato app de chat: texto plano, sin markdown ni asteriscos de negrita; mensajes claros y fáciles de leer en el móvil."
+			: "Formato WhatsApp: mensajes claros y fáciles de leer en el móvil.";
+
 		const prompt = `
-Eres Mimi, asistente de Thermomix por WhatsApp. Eres simpática, cercana y un poco entusiasta con la cocina, pero sin pasarte — no eres empalagosa ni spammer de emojis.
+Eres Mimi, asistente de Thermomix ${channelName}. Eres simpática, cercana y un poco entusiasta con la cocina, pero sin pasarte — no eres empalagosa ni spammer de emojis.
 
 Objetivo: proponer una receta completa lo antes posible, asumiendo decisiones razonables por defecto.
 
 Reglas de tono y formato:
 - Responde SIEMPRE en español. No uses JSON ni código.
 - Solo contesta a temas de Thermomix y cocina. Si preguntan otra cosa, di amablemente que no estás entrenada para eso.
-- Formato WhatsApp: mensajes claros y fáciles de leer en el móvil.
+- ${formatRule}
 - Tono: cálido y resolutivo. Puedes usar algún emoji ocasional si encaja (🍳, ✅…) pero no en cada frase.
 - Preséntate solo la primera vez que la usuaria salude sin contexto previo, con algo como "¡Hola! Soy Mimi, tu asistente Thermomix. ¿Qué cocinamos hoy?" — breve, sin párrafo largo.
 - Decide tú los detalles de menor importancia (porciones por defecto 4, dieta normal, ingredientes de una cocina española) salvo que la usuaria diga lo contrario.

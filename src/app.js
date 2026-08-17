@@ -2,6 +2,7 @@ const express = require("express");
 const { getConfig } = require("./config/env");
 const { createWebhookRouter } = require("./routes/webhook");
 const { createRecipeRouter } = require("./routes/recipes");
+const { createApiRouter } = require("./routes/api");
 const { createWhatsAppService } = require("./services/whatsapp");
 const {
 	createRecipeGenerationService,
@@ -23,6 +24,7 @@ function createApp() {
 
 	app.use("/", createWebhookRouter({ config, whatsapp, recipeAi }));
 	app.use("/r", createRecipeRouter({ config }));
+	app.use("/api", createApiRouter({ config, recipeAi }));
 
 	return app;
 }
