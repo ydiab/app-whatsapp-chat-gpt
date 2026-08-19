@@ -22,6 +22,17 @@ function createApp() {
 	const app = express();
 	app.use(express.json());
 
+	// Mobile app web preview (Expo) runs on another origin/port in dev.
+	app.use("/api", (req, res, next) => {
+		res.setHeader("Access-Control-Allow-Origin", "*");
+		res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+		res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+		if (req.method === "OPTIONS") {
+			return res.sendStatus(204);
+		}
+		next();
+	});
+
 	app.use("/", createWebhookRouter({ config, whatsapp, recipeAi }));
 	app.use("/r", createRecipeRouter({ config }));
 	app.use("/api", createApiRouter({ config, recipeAi }));
