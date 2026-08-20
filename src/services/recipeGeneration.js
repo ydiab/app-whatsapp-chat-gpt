@@ -34,10 +34,13 @@ Devuelve EXCLUSIVAMENTE JSON válido (sin markdown) con este esquema:
   "tags": ["string"],
   "nutrition_notes": "string"
 }
-INGREDIENTES (báscula Thermomix en gramos):
-- Peso SIEMPRE en gramos: quantity como "120 g", nunca ml, litros ni unidades (nada de "1 pimiento" ni "1 pimiento (120g) mediano").
-- name específico: "pimiento rojo", "pimiento verde", "cebolla", etc. La línea en Cookidoo será "120 g de pimiento rojo".
-- Líquidos: convierte ml a gramos aproximados (agua/leche 1 ml ≈ 1 g).
+INGREDIENTES (unidades estándar de cocina):
+- Ingredientes que se pesan en la báscula (verduras, carnes, pescados, pasta, arroz, harina, quesos, líquidos...): quantity en gramos, como "120 g" (nada de "1 pimiento" ni "1 pimiento (120g) mediano"). Líquidos: convierte ml a gramos aproximados (agua/leche/caldo 1 ml ≈ 1 g).
+- Ingredientes con unidad natural propia: usa esa unidad, NO gramos:
+  - ajo → quantity "2 dientes" y name "ajo"; huevos → quantity "2" y name "huevos"; laurel → quantity "1 hoja" y name "laurel".
+  - name NUNCA repite la unidad: name "ajo" (no "dientes de ajo"), name "laurel" (no "hoja de laurel").
+- Sal, pimienta y especias (pimentón, comino, orégano...): SIEMPRE en cucharaditas o cucharadas, como "1 cucharadita" o "1/2 cucharadita". PROHIBIDO "al gusto", "una pizca" o dejar la cantidad vacía.
+- name específico: "pimiento rojo", "pimiento verde", "cebolla", etc. La línea en Cookidoo será "quantity de name": "120 g de pimiento rojo", "2 dientes de ajo", "1 cucharadita de sal".
 
 PASOS Y COOKIDOO:
 - "ingredient_indices": SOLO índices 0-based de ingredientes que se ECHAN o AÑADEN al vaso EN ESE paso concreto.
@@ -137,7 +140,7 @@ Fases de la conversación:
    - Nombre de la receta
    - Porciones y tiempo total
    - Calorías aproximadas por porción (si puedes estimarlas)
-   - Ingredientes con cantidades en gramos ("120 g de pimiento rojo", nunca "1 pimiento")
+   - Ingredientes con unidades estándar de cocina: en gramos lo que se pesa en la báscula ("120 g de pimiento rojo", nunca "1 pimiento"); en su unidad natural lo que la tiene ("2 dientes de ajo", "2 huevos", "1 hoja de laurel"); sal, pimienta y especias siempre en cucharaditas/cucharadas ("1 cucharadita de sal"), nunca "al gusto" ni "una pizca"
    - Pasos numerados para Thermomix (tiempo, temperatura, velocidad, giro inverso cuando aplique)
    - Una frase final amigable tipo "¿Quieres cambiar algo? Si te gusta, dale a Subir a Cookidoo."
    - En la ÚLTIMA línea escribe exactamente: ${RECETA_LISTA_MARKER}

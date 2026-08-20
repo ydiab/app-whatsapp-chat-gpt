@@ -153,11 +153,13 @@ function findCookingAnnotationsInText(text) {
 }
 
 /**
- * Convierte cantidades sueltas a gramos para la báscula TM.
+ * Normaliza cantidades para Cookidoo respetando unidades estándar de cocina
+ * ("2 dientes", "1 cucharadita"): solo convierte volúmenes (ml/l) a gramos
+ * para la báscula TM y extrae pesos indicados entre paréntesis.
  * @param {string} quantity
  * @returns {string}
  */
-function normalizeQuantityToGrams(quantity) {
+function normalizeQuantity(quantity) {
 	let q = String(quantity || "").trim();
 	if (!q) return q;
 
@@ -177,22 +179,8 @@ function normalizeQuantityToGrams(quantity) {
 		return `${Number.isInteger(num) ? num : Math.round(num)} g`;
 	});
 
-	q = q.replace(
-		/^(\d+)\s+(?:unidad(?:es)?|ud\.?|pieza(?:s)?)\b/i,
-		"",
-	);
-
-	if (!/\bg\b/i.test(q) && /^\d+(?:[.,]\d+)?$/.test(q)) {
-		q = `${q} g`;
-	}
-
-	if (/\d/.test(q) && !/\bg\b/i.test(q)) {
-		const num = q.match(/^(\d+(?:[.,]\d+)?)/);
-		const rest = q.replace(/^(\d+(?:[.,]\d+)?)\s*/, "").trim();
-		if (num && rest) {
-			q = `${num[1].replace(",", ".")} g`;
-		}
-	}
+	// "2 unidades" / "2 ud." / "2 piezas" → "2" (la línea final será "2 huevos")
+	q = q.replace(/^(\d+)\s+(?:unidad(?:es)?|ud\.?|pieza(?:s)?)\b/i, "$1");
 
 	return q.replace(/\s+/g, " ").trim();
 }
@@ -202,8 +190,8 @@ function normalizeQuantityToGrams(quantity) {
  * @returns {string}
  */
 function formatIngredientLine(item) {
-	const name = item.name != null ? String(item.name).trim() : "";
-	const quantity = normalizeQuantityToGrams(
+	let name = item.name != null ? String(item.name).trim() : "";
+	const quantity = normalizeQuantity(
 		item.quantity != null ? String(item.quantity).trim() : "",
 	);
 
@@ -217,6 +205,20 @@ function formatIngredientLine(item) {
 		return quantity;
 	}
 
+	// El modelo a veces repite la unidad en el nombre ("6 dientes" + "dientes de
+	// ajo"); quitarla evita líneas tipo "6 dientes de dientes de ajo".
+	const unitWord = quantity.match(/^\d+(?:[.,/]\d+)?\s+(\p{L}+)$/u)?.[1];
+	if (
+		unitWord &&
+		name.toLowerCase().startsWith(`${unitWord.toLowerCase()} de `)
+	) {
+		name = name.slice(unitWord.length + " de ".length).trim();
+	}
+
+	// Cantidad sin unidad ("2" huevos) → "2 huevos", sin "de"
+	if (/^\d+(?:[.,/]\d+)?$/.test(quantity)) {
+		return `${quantity} ${name}`;
+	}
 	if (/^\d/.test(quantity) && !/\bde\b/i.test(quantity)) {
 		return `${quantity} de ${name}`;
 	}
@@ -238,8 +240,7 @@ function normalizeTmModeChip(raw) {
 
 	const min = s.match(/(\d+(?:[.,]\d+)?)\s*min(?:utos?)?/i);
 	const sec = s.match(/(\d+)\s*seg(?:undos?)?/i);
-	const temp =
-		/Varoma/i.test(s) ? "Varoma" : s.match(/(\d+)\s*°?\s*C/i)?.[1];
+	const temp = /Varoma/i.test(s) ? "Varoma" : s.match(/(\d+)\s*°?\s*C/i)?.[1];
 	const reverse = /giro\s*inverso|inverso|antihorario/i.test(s);
 
 	let speed = "1";
@@ -408,7 +409,7 @@ function findIngredientLocationInText(name, text) {
 
 module.exports = {
 	formatIngredientLine,
-	normalizeQuantityToGrams,
+	normalizeQuantity,
 	normalizeTmModeChip,
 	resolveTmModeChip,
 	findCookingAnnotationsInText,
