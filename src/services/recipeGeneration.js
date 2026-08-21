@@ -9,10 +9,25 @@ const { formatMessagesForPrompt } = require("./conversationContext");
 function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 	const ai = { openAiApiKey, openAiModel };
 
+	function looksLikeCompleteRecipe(text) {
+		const body = String(text || "").trim();
+		if (!body) {
+			return false;
+		}
+		const lower = body.toLowerCase();
+		const hasIngredients = /\bingredientes\b/.test(lower);
+		const hasSteps =
+			/\bpasos\b/.test(lower) ||
+			/\bpara thermomix\b/.test(lower) ||
+			/\n\s*\d+\.\s/.test(body);
+		return hasIngredients && hasSteps;
+	}
+
 	function parseProposalResponse(text) {
 		const raw = String(text || "").trim();
-		const isComplete = raw.includes(RECETA_LISTA_MARKER);
 		const content = raw.split(RECETA_LISTA_MARKER).join("").trim();
+		const isComplete =
+			raw.includes(RECETA_LISTA_MARKER) || looksLikeCompleteRecipe(content);
 		return { content, isComplete };
 	}
 
@@ -177,7 +192,7 @@ Fases de la conversación:
    - Calorías aproximadas por porción (si puedes estimarlas)
    - Ingredientes con unidades estándar de cocina: en gramos lo que se pesa en la báscula ("120 g de pimiento rojo", nunca "1 pimiento"); en su unidad natural lo que la tiene ("2 dientes de ajo", "2 huevos", "1 hoja de laurel"); sal, pimienta y especias siempre en cucharaditas/cucharadas ("1 cucharadita de sal"), nunca "al gusto" ni "una pizca"
    - Pasos numerados para Thermomix (tiempo, temperatura, velocidad, giro inverso cuando aplique)
-   - Una frase final amigable tipo "¿Quieres cambiar algo? Si te gusta, dale a Subir a Cookidoo."
+   - Una frase final amigable${isApp ? ' tipo "¿Quieres cambiar algo?" — NO menciones el botón Subir a Cookidoo; la app lo muestra sola' : ' tipo "¿Quieres cambiar algo? Si te gusta, dale a Subir a Cookidoo."'}
    - En la ÚLTIMA línea escribe exactamente: ${RECETA_LISTA_MARKER}
 3) Si la usuaria pide cambios, aplícalos y muestra la receta completa de nuevo con ${RECETA_LISTA_MARKER}. Sin preguntas abiertas.
 

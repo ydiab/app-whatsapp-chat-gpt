@@ -46,20 +46,24 @@ async function runChatTurn(userId, recipeAi, { channel = "whatsapp" } = {}) {
 	let prepError = null;
 
 	if (isComplete) {
-		try {
-			recipe = await recipeAi.generateRecipeForCookidoo(conversation);
-			validateRecipeForUpload(recipe);
-			const recipeId = randomUUID();
-			recipeStore.set(recipeId, {
-				id: recipeId,
-				createdAt: new Date().toISOString(),
-				...recipe,
-			});
-			setLastCreatedRecipeId(userId, recipeId);
-			setRecipeReady(userId, true);
-		} catch (error) {
-			prepError = error;
-			setRecipeReady(userId, false);
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				recipe = await recipeAi.generateRecipeForCookidoo(conversation);
+				validateRecipeForUpload(recipe);
+				const recipeId = randomUUID();
+				recipeStore.set(recipeId, {
+					id: recipeId,
+					createdAt: new Date().toISOString(),
+					...recipe,
+				});
+				setLastCreatedRecipeId(userId, recipeId);
+				setRecipeReady(userId, true);
+				prepError = null;
+				break;
+			} catch (error) {
+				prepError = error;
+				setRecipeReady(userId, false);
+			}
 		}
 	} else {
 		setRecipeReady(userId, false);

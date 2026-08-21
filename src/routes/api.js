@@ -66,10 +66,17 @@ function createApiRouter({ config, recipeAi }) {
 
 			if (prepError) {
 				console.error("Preparar receta Cookidoo (api):", prepError);
-				return res.json({ reply, recipeReady: false });
+				return res.json({
+					reply: `${reply}\n\n(No pude preparar la receta para Cookidoo. Inténtalo de nuevo en un momento.)`,
+					recipeReady: false,
+				});
 			}
 
 			const recipeId = getLastCreatedRecipeId(userId);
+			if (!recipeId) {
+				console.error("Receta completa pero sin recipeId (api)");
+				return res.json({ reply, recipeReady: false });
+			}
 			return res.json({ reply, recipeReady: true, recipeId });
 		} catch (error) {
 			console.error("Error en /api/chat:", error);
