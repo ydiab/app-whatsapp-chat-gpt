@@ -45,6 +45,7 @@ function formatImportedRecipeForAi(recipe) {
 		"IMPORTANTE: respeta EXACTAMENTE estos ingredientes, cantidades y pasos.",
 		"NO la mejores ni cambies proporciones por iniciativa propia.",
 		"Solo conviértela a formato Thermomix y aplica ÚNICAMENTE la adaptación que pida la usuaria (raciones, calorías, sin gluten, etc.).",
+		"Si la adaptación cambia las raciones o calorías, ajusta también los tiempos de cocción/sofrito/calentado al nuevo volumen (mantén velocidades y temperaturas; el horno convencional no cambia).",
 		"En los pasos, menciona cada ingrediente con el MISMO nombre que en la lista (p. ej. jamón cocido, no jamón de York).",
 		"No escribas ingredient_indices, corchetes de índice ni JSON en el texto que lee la usuaria.",
 	]
