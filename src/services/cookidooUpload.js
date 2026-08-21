@@ -67,15 +67,15 @@ function normalizeForMatch(s) {
 }
 
 const ADD_INGREDIENT_PATTERN =
-	/\b(añad|agreg|ech|incorpor|pon(?:er|ga)|verter|deposite|introduc|mezclar\s+con|juntar)\w*/i;
+	/\b(añad|agreg|ech|incorpor|pon(?:er|ga)|vert|deposit|introduc|mezcl|juntar|fund|derret|bati|tamiz|mont|integr|espolvore|amas|dilu)\w*/i;
 
 /** Paso que solo programa/cocina lo que ya hay en el vaso (sin echar ingredientes nuevos). */
-function isCookingOnlyStep(text, tmMode) {
+function isCookingOnlyStep(text, tmMode, mentionsIngredient) {
 	const t = String(text || "").trim();
 	if (!t) {
 		return Boolean(tmMode);
 	}
-	if (ADD_INGREDIENT_PATTERN.test(t)) {
+	if (ADD_INGREDIENT_PATTERN.test(t) || mentionsIngredient) {
 		return false;
 	}
 	return Boolean(tmMode);
@@ -83,6 +83,27 @@ function isCookingOnlyStep(text, tmMode) {
 
 function stepAddsIngredients(text) {
 	return ADD_INGREDIENT_PATTERN.test(String(text || ""));
+}
+
+/** Cookidoo rechaza anotaciones superpuestas (p. ej. "chocolate" dentro de "chocolate negro"). */
+function dropOverlappingPlacements(placed) {
+	const sorted = [...placed].sort(
+		(a, b) => b.length - a.length || a.offset - b.offset,
+	);
+	const kept = [];
+	for (const item of sorted) {
+		const overlaps = kept.some(
+			(other) =>
+				!(
+					item.offset + item.length <= other.offset ||
+					other.offset + other.length <= item.offset
+				),
+		);
+		if (!overlaps) {
+			kept.push(item);
+		}
+	}
+	return kept.sort((a, b) => a.offset - b.offset);
 }
 
 function ingredientMentionedInText(ingredientName, stepText) {
@@ -141,13 +162,13 @@ function inferIngredientIndicesPerStep(recipe) {
 
 		for (let j = 0; j < sortedSteps.length; j++) {
 			const stepText = sortedSteps[j].text || "";
-			if (!stepAddsIngredients(stepText)) {
-				continue;
-			}
 			if (!ingredientMentionedInText(name, stepText)) {
 				continue;
 			}
-			const score = normalizeForMatch(name).length;
+			let score = normalizeForMatch(name).length;
+			if (stepAddsIngredients(stepText)) {
+				score += 100;
+			}
 			if (score > bestScore) {
 				bestScore = score;
 				bestStep = j;
@@ -194,10 +215,10 @@ function resolveIngredientIndicesPerStep(recipe) {
 			}));
 
 	steps = steps.map((step) => {
-		if (isCookingOnlyStep(step.text, step.tm_mode)) {
-			return { ...step, ingredient_indices: [] };
-		}
-		if (step.ingredient_indices.length > 0 && !stepAddsIngredients(step.text)) {
+		const mentionsAssigned = step.ingredient_indices.some((i) =>
+			ingredientMentionedInText(ingredients[i]?.name, step.text),
+		);
+		if (isCookingOnlyStep(step.text, step.tm_mode, mentionsAssigned)) {
 			return { ...step, ingredient_indices: [] };
 		}
 		return step;
@@ -283,6 +304,13 @@ function buildStepInstruction(step, rows, opts = {}) {
 			missing.push({ idx, row });
 		}
 	}
+	const nonOverlapping = dropOverlappingPlacements(placed);
+	for (const item of placed) {
+		if (!nonOverlapping.some((kept) => kept.idx === item.idx)) {
+			missing.push({ idx: item.idx, row: item.row });
+		}
+	}
+	placed.splice(0, placed.length, ...nonOverlapping);
 
 	let prefix = "";
 	const prefixAnns = [];
@@ -662,6 +690,10 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPat
 
 	let stepRes = await patchInstructions(true);
 	if (!stepRes.ok && stepRes.status === 400) {
+		console.error(
+			"Cookidoo rechazó los enlaces de ingredientes en los pasos; reintento sin anotaciones:",
+			stepRes.responseText.slice(0, 500),
+		);
 		stepRes = await patchInstructions(false);
 	}
 
