@@ -257,6 +257,7 @@ function buildIngredientAnnotation(row, offset, length) {
 		type: "INGREDIENT",
 		data: {
 			description: row.text,
+			notes: [],
 		},
 		position: { offset, length },
 	};
@@ -301,6 +302,22 @@ function cookingAnnotationForUpload(template, nativeChip, chipOffset) {
 	return out;
 }
 
+function removeCookingChipsFromText(body) {
+	let text = String(body || "");
+	for (let i = 0; i < 8; i++) {
+		const found = findCookingAnnotationsInText(text);
+		if (!found.length) break;
+		const { offset, length } = found[0].position;
+		const before = text.slice(0, offset).replace(/\s+$/, "");
+		let after = text.slice(offset + length);
+		if (!after.startsWith(".")) {
+			after = after.replace(/^\s+/, after ? " " : "");
+		}
+		text = `${before}${after}`.replace(/\s+\./g, ".").replace(/\s{2,}/g, " ");
+	}
+	return text.trim();
+}
+
 const COOK_VERB_PATTERNS = [
 	/\b(?:turbo)\p{L}*/giu,
 	/\b(?:amas)\p{L}*/giu,
@@ -335,33 +352,24 @@ function findLastCookVerb(sentence) {
 	return best;
 }
 
-function removeCookingChipsFromText(body) {
-	let text = String(body || "");
-	for (let i = 0; i < 8; i++) {
-		const found = findCookingAnnotationsInText(text);
-		if (!found.length) break;
-		const { offset, length } = found[0].position;
-		const before = text.slice(0, offset).replace(/\s+$/, "");
-		let after = text.slice(offset + length);
-		if (!after.startsWith(".")) {
-			after = after.replace(/^\s+/, after ? " " : "");
-		}
-		text = `${before}${after}`.replace(/\s+\./g, ".").replace(/\s{2,}/g, " ");
+/**
+ * El TTS de la Thermomix llega hasta 120°C (más allá es horno u otro
+ * electrodoméstico). Un chip a 180°C hace que Cookidoo devuelva 400 y el
+ * reintento tira TODOS los programas de la receta, no solo el inválido.
+ */
+function isValidMachineProgram(template) {
+	if (template.type === "MODE" && template.name === "steaming") {
+		return true;
 	}
-	return text.trim();
+	const temp = Number(template.data?.temperature?.value);
+	return !temp || temp <= 120;
 }
 
-/**
- * El verbo queda en prosa ("Mezcla") y justo después va el chip nativo
- * ("20 seg/vel 3"), que es lo único que Cookidoo pone en negrita y enlaza
- * al programa de la máquina.
- */
-function placeNativeChipInBody(body, nativeChip) {
-	if (!nativeChip) {
-		return { text: body, chipOffset: -1 };
-	}
-
+function placeChipAfterCookVerb(body, nativeChip) {
 	const text = removeCookingChipsFromText(body);
+	if (!nativeChip) {
+		return { text, chipOffset: -1 };
+	}
 
 	let best = null;
 	let searchFrom = 0;
@@ -398,18 +406,12 @@ function placeNativeChipInBody(body, nativeChip) {
 	}
 
 	const sep = text ? " " : "";
-	return { text: text + sep + nativeChip, chipOffset: text.length + sep.length };
+	return {
+		text: text + sep + nativeChip,
+		chipOffset: text.length + sep.length,
+	};
 }
 
-/**
- * Paso al estilo Cookidoo oficial: prosa con el nombre del ingrediente
- * enlazado in situ (sin repetir "100 g de…" al inicio) y chip TTS en la
- * frase de cocción. No se inventan secciones.
- *
- * @param {{ text: string, tm_mode?: string, ingredient_indices?: number[] }} step
- * @param {{ text: string, localId: string, name: string, quantity?: string }[]} rows
- * @param {{ withAnnotations?: boolean, includeCookingAnnotations?: boolean }} opts
- */
 function buildStepInstruction(step, rows, opts = {}) {
 	const withAnnotations = opts.withAnnotations !== false;
 	const includeCookingAnnotations = opts.includeCookingAnnotations !== false;
@@ -418,21 +420,21 @@ function buildStepInstruction(step, rows, opts = {}) {
 		.sort((a, b) => a - b);
 
 	const body = stripInternalStepNoise(step.text);
-	const userChip = resolveTmModeChip({ tm_mode: step.tm_mode, text: "" })
-		|| resolveTmModeChip(step);
+	const userChip =
+		resolveTmModeChip({ tm_mode: step.tm_mode, text: "" }) ||
+		resolveTmModeChip(step);
 	let chipTemplate = null;
 	let nativeChip = null;
 	if (userChip) {
-		const found = findCookingAnnotationsInText(userChip);
-		if (found.length > 0) {
-			chipTemplate = found[0];
-			nativeChip = buildCookidooNativeChip(chipTemplate);
+		const found = findCookingAnnotationsInText(userChip)[0];
+		if (found && isValidMachineProgram(found)) {
+			chipTemplate = found;
+			nativeChip = buildCookidooNativeChip(found);
 		}
 	}
 
-	const placed = placeNativeChipInBody(body, nativeChip);
+	const placed = placeChipAfterCookVerb(body, nativeChip);
 	const text = placed.text || "paso";
-
 	const instruction = { type: "STEP", text };
 	if (!withAnnotations) {
 		return instruction;
@@ -448,11 +450,7 @@ function buildStepInstruction(step, rows, opts = {}) {
 			nativeChip
 	) {
 		annotations.push(
-			cookingAnnotationForUpload(
-				chipTemplate,
-				nativeChip,
-				placed.chipOffset,
-			),
+			cookingAnnotationForUpload(chipTemplate, nativeChip, placed.chipOffset),
 		);
 	}
 
@@ -461,6 +459,13 @@ function buildStepInstruction(step, rows, opts = {}) {
 		instruction.annotations = cleaned;
 	}
 	return instruction;
+}
+
+function buildInstructions(enrichedSteps, rows, opts = {}) {
+	const built = enrichedSteps.map((step) =>
+		buildStepInstruction(step, rows, opts),
+	);
+	return built.length > 0 ? built : [{ type: "STEP", text: "paso" }];
 }
 
 async function patchJson(url, authHeaders, body) {
@@ -759,25 +764,24 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPat
 
 	const patchInstructions = (opts) =>
 		patchJson(patchUrl, authHeaders, {
-			instructions: enrichedSteps.map((step) =>
-				buildStepInstruction(step, rows, opts),
-			),
+			instructions: buildInstructions(enrichedSteps, rows, opts),
 		});
 
 	let stepRes = await patchInstructions({ withAnnotations: true });
 	if (!stepRes.ok && stepRes.status === 400) {
 		console.error(
 			"Cookidoo rechazó ingredientes+TTS; reintento solo con programas de la máquina:",
-			stepRes.responseText.slice(0, 500),
+			stepRes.responseText.slice(0, 800),
 		);
 		stepRes = await patchJson(patchUrl, authHeaders, {
-			instructions: enrichedSteps.map((step) => {
-				const built = buildStepInstruction(step, rows, {
-					withAnnotations: true,
-					includeCookingAnnotations: true,
-				});
+			instructions: buildInstructions(enrichedSteps, rows, {
+				withAnnotations: true,
+				includeCookingAnnotations: true,
+			}).map((built) => {
 				if (Array.isArray(built.annotations)) {
-					built.annotations = built.annotations.filter((a) => a.type === "TTS");
+					built.annotations = built.annotations.filter(
+						(a) => a.type === "TTS" || a.type === "MODE",
+					);
 					if (built.annotations.length === 0) delete built.annotations;
 				}
 				return built;
