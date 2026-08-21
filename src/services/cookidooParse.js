@@ -130,6 +130,7 @@ function splitInstructionAndTm(instruction) {
 	const tm_mode =
 		normalizeTmModeChip(chipRaw.replace(/\//g, " / ")) || chipRaw;
 	let text = full.replace(chipRaw, "").trim();
+	text = text.replace(/\s{2,}/g, " ").replace(/\s+\./g, ".");
 	text = text.replace(/\s*\.\s*Retire y reserve\.?\s*$/i, "").trim();
 
 	return { text, tm_mode };
@@ -503,13 +504,22 @@ function looksLikeCookidooUrl(text) {
 	return COOKIDOO_URL_RE.test(String(text || "").trim());
 }
 
+function extractCookidooUrl(text) {
+	const m = String(text || "").match(/https?:\/\/cookidoo\.[a-z.]+\/[^\s<>"']+/i);
+	if (!m) {
+		return null;
+	}
+	return m[0].replace(/[.,;!?)]+$/, "");
+}
+
 /**
  * Extrae el recipe ID (p. ej. "r000011988") de una URL de Cookidoo.
  * @param {string} text
  * @returns {string|null}
  */
 function extractRecipeIdFromUrl(text) {
-	const m = COOKIDOO_URL_RE.exec(String(text || ""));
+	const fromUrl = extractCookidooUrl(text);
+	const m = COOKIDOO_URL_RE.exec(fromUrl || String(text || ""));
 	return m ? m[1] : null;
 }
 
@@ -519,7 +529,9 @@ module.exports = {
 	looksLikeCookidooJson: looksLikeRecipeJson,
 	looksLikeRecipeJson,
 	looksLikeCookidooUrl,
+	extractCookidooUrl,
 	extractRecipeIdFromUrl,
+	splitInstructionAndTm,
 	unwrapCookidooPayload,
 	isCookidooApiContent,
 };

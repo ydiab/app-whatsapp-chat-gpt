@@ -12,6 +12,8 @@ const {
 	recipeToUploadPayload,
 } = require("../utils/validateRecipe");
 const { runChatTurn } = require("../services/chatTurn");
+const { seedCookidooUrlIfPresent } = require("../services/cookidooImport");
+const { looksLikeCookidooUrl } = require("../services/cookidooParse");
 
 /**
  * REST API for the mobile app (app-mimi-mobile). Channel-agnostic twin of the
@@ -73,6 +75,27 @@ function createApiRouter({ config, recipeAi }) {
 
 		try {
 			pushConversationMessage(userId, "user", message);
+
+			if (looksLikeCookidooUrl(message)) {
+				try {
+					await seedCookidooUrlIfPresent({
+						userId,
+						userText: message,
+						credentialsPath: config.cookidooCredentialsPath,
+						cookiesPath: config.cookidooCookiesPath,
+					});
+				} catch (importError) {
+					console.error("Importar URL Cookidoo (api):", importError);
+					const errorText = `No pude leer esa receta de Cookidoo: ${importError.message}`;
+					if (wantsStream) {
+						emit({ type: "error", error: errorText });
+						emit({ type: "done" });
+						return res.end();
+					}
+					return res.status(502).json({ error: errorText });
+				}
+			}
+
 			const {
 				proposal: reply,
 				isComplete,

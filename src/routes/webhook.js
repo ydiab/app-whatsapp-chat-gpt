@@ -22,11 +22,10 @@ const {
 	parseCookidooJson,
 	looksLikeRecipeJson,
 	looksLikeCookidooUrl,
-	extractRecipeIdFromUrl,
 	unwrapCookidooPayload,
 	isCookidooApiContent,
 } = require("../services/cookidooParse");
-const { fetchCookidooRecipe } = require("../services/cookidooFetch");
+const { seedCookidooUrlIfPresent } = require("../services/cookidooImport");
 const {
 	validateRecipeForUpload,
 	isStoredRecipeUsable,
@@ -184,32 +183,15 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 			}
 
 			if (looksLikeCookidooUrl(userText)) {
-				const recipeId = extractRecipeIdFromUrl(userText);
-				await whatsapp.sendText(from, `Buscando la receta en Cookidoo… ⏳`);
-
-				let credentialsOk = false;
+				await whatsapp.sendText(from, "Buscando la receta en Cookidoo… ⏳");
 				try {
-					await fs.access(config.cookidooCredentialsPath);
-					credentialsOk = true;
-				} catch {
-					credentialsOk = false;
-				}
-
-				if (!credentialsOk) {
-					await whatsapp.sendText(
-						from,
-						"Necesito las credenciales de Cookidoo para obtener la receta. Añade cookidoo-credentials.json al proyecto.",
-					);
-					return;
-				}
-
-				let recipe;
-				try {
-					recipe = await fetchCookidooRecipe(
-						recipeId,
-						config.cookidooCredentialsPath,
-						config.cookidooCookiesPath,
-					);
+					pushConversationMessage(from, "user", userText);
+					await seedCookidooUrlIfPresent({
+						userId: from,
+						userText,
+						credentialsPath: config.cookidooCredentialsPath,
+						cookiesPath: config.cookidooCookiesPath,
+					});
 				} catch (fetchError) {
 					console.error("Cookidoo fetch error:", fetchError);
 					await whatsapp.sendText(
@@ -219,120 +201,28 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 					return;
 				}
 
-				const isPartial = recipe._partial === true;
-				// Limpiamos campos internos antes de guardar/usar
-				const nativeContent = recipe._cookidooNative || null;
-				delete recipe._cookidooNative;
-				delete recipe._cookidooRecipeId;
-				delete recipe._partial;
+				const { proposal, isComplete, prepError } = await runChatTurn(
+					from,
+					recipeAi,
+				);
 
-				if (isPartial) {
-					// Cookidoo no expone los pasos en su página pública: solo tenemos
-					// título, ingredientes y tiempos. Guardamos la receta original como
-					// contexto y NO la modificamos por iniciativa propia.
-					const ingLines = (recipe.ingredients || [])
-						.map((i) =>
-							[i.quantity, i.name].filter(Boolean).join(" de ").trim(),
-						)
-						.join("\n");
-
-					// ¿La usuaria mandó el link junto con una instrucción de adaptación?
-					const extraInstruction = userText
-						.replace(/https?:\/\/\S+/g, "")
-						.trim();
-
-					const referenceMsg =
-						`Receta de Cookidoo que quiero subir: ${recipe.title} ` +
-						`(${recipe.servings} raciones, ~${recipe.total_time_min} min).\n` +
-						`Ingredientes originales:\n${ingLines}\n\n` +
-						`IMPORTANTE: respeta EXACTAMENTE estos ingredientes y cantidades. ` +
-						`Conviértela a formato Thermomix (pasos) SIN cambiar nada ni "mejorarla", ` +
-						`salvo que la usuaria pida una adaptación concreta (calorías, raciones, sin gluten, etc.).`;
-					pushConversationMessage(from, "user", referenceMsg);
-
-					if (!extraInstruction) {
-						// Sin instrucción: enseñamos la receta y preguntamos qué quiere.
-						setRecipeReady(from, false);
-						const ask =
-							`He encontrado *${recipe.title}* en Cookidoo 🧾\n` +
-							`(${recipe.servings} raciones · ~${recipe.total_time_min} min)\n\n` +
-							`Ingredientes:\n${ingLines}\n\n` +
-							`¿Cómo la quieres?\n` +
-							`• *Tal cual*: la paso a pasos de Thermomix respetando las cantidades.\n` +
-							`• *Adaptada*: dime el cambio (por ejemplo "bájale calorías", "para 2 raciones" o "sin gluten") y te la ajusto.`;
-						pushConversationMessage(from, "assistant", ask);
-						await whatsapp.sendText(from, ask);
-						return;
-					}
-
-					// La usuaria mandó el link + una adaptación → la aplicamos.
-					pushConversationMessage(
-						from,
-						"user",
-						`Adaptación que quiero: ${extraInstruction}`,
-					);
-					const { proposal, isComplete, prepError } = await runChatTurn(
-						from,
-						recipeAi,
-					);
-
-					if (isComplete) {
-						await whatsapp.sendText(
-							from,
-							"Un momento, preparo la receta para Cookidoo… ⏳",
-						);
-						if (!prepError) {
-							await whatsapp.sendUploadToCookidooButton(from, proposal);
-						} else {
-							console.error(
-								"Preparar receta Cookidoo (URL parcial):",
-								prepError,
-							);
-							await whatsapp.sendText(
-								from,
-								`${proposal}\n\nNo pude prepararla para subir: ${prepError.message}`,
-							);
-						}
-					} else {
-						await whatsapp.sendText(from, proposal);
-					}
-					return;
-				}
-
-				// Receta completa (con pasos, p. ej. de la API móvil)
-				try {
-					validateRecipeForUpload(recipe);
-				} catch (validationError) {
+				if (isComplete) {
 					await whatsapp.sendText(
 						from,
-						`La receta de Cookidoo no tiene suficiente contenido: ${validationError.message}`,
+						"Un momento, preparo la receta para Cookidoo… ⏳",
 					);
-					return;
+					if (!prepError) {
+						await whatsapp.sendUploadToCookidooButton(from, proposal);
+					} else {
+						console.error("Preparar receta Cookidoo (URL):", prepError);
+						await whatsapp.sendText(
+							from,
+							`${proposal}\n\nNo pude prepararla para subir: ${prepError.message}`,
+						);
+					}
+				} else {
+					await whatsapp.sendText(from, proposal);
 				}
-
-				const recipeId2 = randomUUID();
-				const entry = {
-					id: recipeId2,
-					createdAt: new Date().toISOString(),
-					...recipe,
-					importSource: "cookidoo-url",
-				};
-				if (nativeContent) {
-					entry.cookidooNative = nativeContent;
-				}
-
-				recipeStore.set(recipeId2, entry);
-				setLastCreatedRecipeId(from, recipeId2);
-				setRecipeReady(from, true);
-
-				const summary = formatRecipeForWhatsApp(recipe);
-				setCurrentRecipeText(from, summary);
-				const intro = `Aquí tienes la receta de Cookidoo *${recipe.title}*.\n\nSi quieres cambiar algo (ingredientes, porciones, sin gluten…) dímelo y la adapto. Si te gusta tal cual, pulsa *Subir a Cookidoo*.\n\n${summary}`;
-
-				pushConversationMessage(from, "user", `[URL Cookidoo: ${recipeId}]`);
-				pushConversationMessage(from, "assistant", summary);
-
-				await whatsapp.sendUploadToCookidooButton(from, intro);
 				return;
 			}
 

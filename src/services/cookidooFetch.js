@@ -10,7 +10,10 @@
 
 const { loadCookidooCredentials } = require("./cookidooUpload");
 const { buildCookidooSession } = require("./cookidooAuth");
-const { parseCookidooApiContent } = require("./cookidooParse");
+const {
+	parseCookidooApiContent,
+	splitInstructionAndTm,
+} = require("./cookidooParse");
 
 // ─── helpers de scraping ─────────────────────────────────────────────────────
 
@@ -98,16 +101,14 @@ async function tryApiFetch(recipeId, apiBase, authHeaders, language) {
 
 // ─── web scrape fallback ──────────────────────────────────────────────────────
 
-async function tryWebScrape(recipeId, creds, cookieHeader) {
-	// Construct the canonical recipe URL
-	const webUrl = `${creds.cookidooBaseUrl}/recipes/recipe/${creds.language}/${recipeId}`;
+async function fetchHtml(webUrl, language, cookieHeader) {
 	let res;
 	try {
 		res = await fetch(webUrl, {
 			headers: {
 				"User-Agent":
 					"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-				"Accept-Language": `${creds.language},es;q=0.9`,
+				"Accept-Language": `${language || "es-ES"},es;q=0.9`,
 				Accept: "text/html,application/xhtml+xml",
 				...(cookieHeader ? { Cookie: cookieHeader } : {}),
 			},
@@ -119,18 +120,22 @@ async function tryWebScrape(recipeId, creds, cookieHeader) {
 
 	if (res.status === 404) {
 		throw new Error(
-			`Receta ${recipeId} no encontrada en Cookidoo. Comprueba que el enlace sea correcto y que la receta sea pública.`,
+			"Receta no encontrada en Cookidoo. Comprueba que el enlace sea correcto y que la receta sea pública.",
 		);
 	}
 	if (!res.ok) {
 		throw new Error(`Cookidoo web HTTP ${res.status} al obtener la receta.`);
 	}
 
-	const html = await res.text();
+	return res.text();
+}
+
+async function tryWebScrapeAtUrl(webUrl, language, cookieHeader) {
+	const html = await fetchHtml(webUrl, language, cookieHeader);
 	const scraped = extractFromHtml(html);
 	if (!scraped) {
 		throw new Error(
-			`No pude extraer datos de la página Cookidoo (puede ser que requiera login o sea contenido dinámico). Prueba a pegar el JSON de la receta directamente.`,
+			"No pude extraer ingredientes y pasos del código de la página Cookidoo (JSON-LD). Prueba a pegar el JSON de la receta directamente.",
 		);
 	}
 	return scraped;
@@ -167,47 +172,100 @@ function decodeHtmlEntities(s) {
 		.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
 }
 
+function stripHtml(s) {
+	return decodeHtmlEntities(String(s || "").replace(/<[^>]+>/g, " "))
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function flattenSchemaInstructions(rawSteps) {
+	const out = [];
+	const visit = (node) => {
+		if (!node) {
+			return;
+		}
+		if (typeof node === "string") {
+			const text = stripHtml(node);
+			if (text) {
+				out.push(text);
+			}
+			return;
+		}
+		if (Array.isArray(node)) {
+			node.forEach(visit);
+			return;
+		}
+		if (Array.isArray(node.itemListElement)) {
+			visit(node.itemListElement);
+			return;
+		}
+		const text = stripHtml(node.text || "");
+		if (text) {
+			out.push(text);
+		}
+	};
+	visit(rawSteps);
+	return out;
+}
+
+function parseSchemaIngredientLine(line) {
+	const s = stripHtml(line);
+	const m = s.match(
+		/^([\d.,/½¼¾]+\s*(?:g|kg|ml|l|cucharad[a-z]*|pellizco|pizca|unidad[es]*|diente[s]*)?)?\s*(?:de\s+)?(.+)$/i,
+	);
+	return {
+		quantity: m?.[1]?.trim() || "",
+		name: m?.[2]?.trim() || s,
+	};
+}
+
 function normalizeSchemaDotOrg(data) {
-	const title = String(data.name || "Receta importada").trim();
-	const description = decodeHtmlEntities(data.description || "").trim();
+	const title = stripHtml(data.name || "Receta importada");
+	const description = stripHtml(data.description || "");
 
-	const rawIngredients = Array.isArray(data.recipeIngredient)
-		? data.recipeIngredient
-		: [];
-	const ingredients = rawIngredients.map((line) => {
-		const s = decodeHtmlEntities(line).trim();
-		const m = s.match(
-			/^([\d.,/½¼¾]+\s*(?:g|kg|ml|l|cucharad[a-z]*|pizca|unidad[es]*)?)?\s*(?:de\s+)?(.+)$/i,
-		);
-		return {
-			quantity: m?.[1]?.trim() || "",
-			name: m?.[2]?.trim() || s,
-		};
-	});
+	const ingredients = (
+		Array.isArray(data.recipeIngredient) ? data.recipeIngredient : []
+	)
+		.map(parseSchemaIngredientLine)
+		.filter((item) => item.name);
 
-	const rawSteps = Array.isArray(data.recipeInstructions)
-		? data.recipeInstructions
-		: [];
-	const steps = rawSteps.map((step, i) => {
-		const text = decodeHtmlEntities(
-			typeof step === "string" ? step : String(step?.text || step?.name || ""),
-		).trim();
-		return { order: i + 1, text, tm_mode: "", ingredient_indices: [] };
-	});
+	const steps = flattenSchemaInstructions(data.recipeInstructions).map(
+		(instruction, i) => {
+			const { text, tm_mode } = splitInstructionAndTm(instruction);
+			return {
+				order: i + 1,
+				text: text || instruction,
+				tm_mode,
+				ingredient_indices: [],
+			};
+		},
+	);
 
 	const servings =
 		Number(String(data.recipeYield || "4").match(/\d+/)?.[0]) || 4;
 
-	// Cookidoo no incluye pasos en JSON-LD → marcamos como parcial para que
-	// Mimi los genere adaptados a Thermomix.
-	const partial = steps.length === 0;
+	const calories_per_serving = Number(
+		String(data.nutrition?.calories || "").match(/[\d.,]+/)?.[0]?.replace(
+			",",
+			".",
+		),
+	);
 
 	const totalMin = (() => {
 		const iso = String(data.totalTime || data.cookTime || "");
 		const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
-		if (!m) return 30;
-		return (Number(m[1] || 0) * 60) + Number(m[2] || 0) || 30;
+		if (!m) {
+			return 30;
+		}
+		return Number(m[1] || 0) * 60 + Number(m[2] || 0) || 30;
 	})();
+
+	const tags = [
+		"importada-cookidoo",
+		...(Array.isArray(data.recipeCategory) ? data.recipeCategory : []),
+	]
+		.map((tag) => String(tag).trim())
+		.filter(Boolean);
 
 	return {
 		title,
@@ -217,9 +275,14 @@ function normalizeSchemaDotOrg(data) {
 		servings,
 		ingredients,
 		steps,
-		tags: ["importada-cookidoo"],
-		nutrition_notes: "",
-		_partial: partial,
+		tags,
+		nutrition_notes: Number.isFinite(calories_per_serving)
+			? `~${Math.round(calories_per_serving)} kcal/ración`
+			: "",
+		...(Number.isFinite(calories_per_serving) && calories_per_serving > 0
+			? { calories_per_serving: Math.round(calories_per_serving) }
+			: {}),
+		_partial: steps.length === 0,
 		source: { format: "schema-org", importedAt: new Date().toISOString() },
 	};
 }
@@ -228,16 +291,34 @@ function normalizeSchemaDotOrg(data) {
 
 /**
  * Descarga y parsea al formato interno la receta indicada.
+ * Si hay `pageUrl`, prioriza el JSON-LD público del &lt;head&gt; (ingredientes y pasos).
  * @param {string} recipeId  p. ej. "r379830"
  * @param {string} credentialsPath
  * @param {string} [cookiesPath]
+ * @param {string} [pageUrl]  URL completa que pegó la usuaria
  * @returns {Promise<object>}  receta en formato interno Mimi
  */
-async function fetchCookidooRecipe(recipeId, credentialsPath, cookiesPath) {
-	const creds = await loadCookidooCredentials(credentialsPath);
+async function fetchCookidooRecipe(
+	recipeId,
+	credentialsPath,
+	cookiesPath,
+	pageUrl,
+) {
+	let creds = {
+		countryCode: "es",
+		cookidooBaseUrl: "https://cookidoo.es",
+		language: "es-ES",
+	};
+	try {
+		creds = await loadCookidooCredentials(credentialsPath);
+	} catch {
+		if (!pageUrl) {
+			throw new Error(
+				"Falta cookidoo-credentials.json y no hay URL completa para leer la receta.",
+			);
+		}
+	}
 
-	// Construye la sesión por cookies del navegador. Si no hay cookies
-	// válidas, seguimos sin ellas (el scraping de páginas públicas puede bastar).
 	let apiBase = null;
 	let authHeaders = null;
 	let cookieHeader = "";
@@ -253,13 +334,33 @@ async function fetchCookidooRecipe(recipeId, credentialsPath, cookiesPath) {
 		);
 	}
 
-	// 1. Con sesión: intenta la API (recetas del usuario y del catálogo).
+	const webUrl =
+		pageUrl ||
+		`${creds.cookidooBaseUrl}/recipes/recipe/${creds.language}/${recipeId}`;
+
+	// Catálogo público: el JSON-LD del HTML trae ingredientes y pasos reales.
+	try {
+		console.log(`Leyendo JSON-LD de ${webUrl}…`);
+		const scraped = await tryWebScrapeAtUrl(
+			webUrl,
+			creds.language,
+			cookieHeader,
+		);
+		const recipe = normalizeRawData(null, scraped);
+		recipe._cookidooRecipeId = recipeId;
+		if (recipe.ingredients?.length) {
+			return recipe;
+		}
+	} catch (scrapeErr) {
+		console.warn("Scraping JSON-LD falló, pruebo API:", scrapeErr.message);
+	}
+
 	if (apiBase && authHeaders) {
 		let rawApi = null;
 		try {
 			rawApi = await tryApiFetch(recipeId, apiBase, authHeaders, creds.language);
 		} catch (apiErr) {
-			console.warn("Cookidoo API falló, intentando scraping web:", apiErr.message);
+			console.warn("Cookidoo API falló:", apiErr.message);
 		}
 		if (rawApi) {
 			const recipe = normalizeRawData(rawApi, rawApi);
@@ -272,12 +373,9 @@ async function fetchCookidooRecipe(recipeId, credentialsPath, cookiesPath) {
 		}
 	}
 
-	// 2. Fallback: rasca la página web (con cookies si las hay).
-	console.log(`Intentando scraping web para ${recipeId}…`);
-	const scraped = await tryWebScrape(recipeId, creds, cookieHeader);
-	const recipe = normalizeRawData(null, scraped);
-	recipe._cookidooRecipeId = recipeId;
-	return recipe;
+	throw new Error(
+		"No pude extraer la receta de Cookidoo. Comprueba el enlace o pega el JSON.",
+	);
 }
 
 module.exports = { fetchCookidooRecipe };
