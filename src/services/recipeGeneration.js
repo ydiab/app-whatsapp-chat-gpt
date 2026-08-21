@@ -4,6 +4,7 @@ const {
 	extractTextFromOpenAIResponse,
 	extractJsonText,
 } = require("./openai");
+const { formatMessagesForPrompt } = require("./conversationContext");
 
 function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 	const ai = { openAiApiKey, openAiModel };
@@ -13,6 +14,43 @@ function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 		const isComplete = raw.includes(RECETA_LISTA_MARKER);
 		const content = raw.split(RECETA_LISTA_MARKER).join("").trim();
 		return { content, isComplete };
+	}
+
+	function buildContextBlocks({ summary, currentRecipeText }) {
+		const blocks = [];
+		if (summary?.trim()) {
+			blocks.push(`Resumen de la conversación anterior:\n${summary.trim()}`);
+		}
+		if (currentRecipeText?.trim()) {
+			blocks.push(
+				`Receta acordada actualmente (referencia fija; aplícale solo los cambios que pida la usuaria):\n${currentRecipeText.trim()}`,
+			);
+		}
+		return blocks.join("\n\n");
+	}
+
+	async function summarizeConversation({
+		priorSummary,
+		messages,
+		currentRecipeText,
+	}) {
+		const transcript = formatMessagesForPrompt(messages);
+		const prompt = `
+Resume esta conversación entre Mimi (asistente Thermomix) y una usuaria.
+Incluye: qué quiere cocinar, preferencias o restricciones, cambios pedidos y decisiones tomadas.
+NO copies la receta completa (ya está guardada aparte si existe).
+Sé conciso (máximo 300 palabras). Responde en español, texto plano.
+${priorSummary?.trim() ? `\nResumen previo (actualízalo con lo nuevo, no repitas lo obvio):\n${priorSummary.trim()}\n` : ""}${currentRecipeText?.trim() ? "\nNota: ya hay una receta acordada en curso; el resumen debe ayudar a entender el contexto, no sustituir la receta.\n" : ""}
+Mensajes a resumir:
+${transcript}
+`.trim();
+
+		const data = await callOpenAI({ ...ai, input: prompt });
+		const text = extractTextFromOpenAIResponse(data);
+		if (!text) {
+			throw new Error("OpenAI no devolvió resumen de conversación");
+		}
+		return text.trim();
 	}
 
 	async function generateThermomixRecipe(userPrompt) {
@@ -95,15 +133,12 @@ ${userPrompt}
 	}
 
 	async function generateThermomixProposal(
-		conversationMessages,
+		conversation,
 		{ channel = "whatsapp" } = {},
 	) {
-		const history = conversationMessages
-			.map(
-				(item) =>
-					`${item.role === "assistant" ? "Asistente" : "Usuario"}: ${item.content}`,
-			)
-			.join("\n");
+		const { messages, summary, currentRecipeText } = conversation;
+		const history = formatMessagesForPrompt(messages);
+		const contextBlocks = buildContextBlocks({ summary, currentRecipeText });
 
 		const isApp = channel === "app";
 		const channelName = isApp
@@ -150,8 +185,8 @@ OMITE ${RECETA_LISTA_MARKER} solo si:
 - Es un saludo vacío (fase 1).
 - Tienes que hacer una pregunta crítica sin la cual no puedes proponer nada (p. ej. alergia grave).
 
-Historial:
-${history}
+${contextBlocks ? `${contextBlocks}\n\n` : ""}Historial reciente:
+${history || "(sin mensajes recientes)"}
 `.trim();
 
 		const data = await callOpenAI({ ...ai, input: prompt });
@@ -162,17 +197,26 @@ ${history}
 		return parseProposalResponse(text);
 	}
 
-	async function generateRecipeForCookidoo(conversationMessages) {
-		const history = conversationMessages
-			.map(
-				(item) =>
-					`${item.role === "assistant" ? "Asistente" : "Usuario"}: ${item.content}`,
-			)
-			.join("\n");
+	async function generateRecipeForCookidoo(conversation) {
+		const { messages, summary, currentRecipeText } = conversation;
+		const recentHistory = formatMessagesForPrompt(messages.slice(-6));
+		const contextBlocks = buildContextBlocks({ summary, currentRecipeText });
 
-		return generateThermomixRecipe(
-			`Convierte en JSON la receta completa acordada en este historial:\n${history}`,
-		);
+		let userPrompt;
+		if (currentRecipeText?.trim()) {
+			userPrompt = `Convierte en JSON la receta completa acordada:\n${currentRecipeText.trim()}`;
+			if (contextBlocks) {
+				userPrompt += `\n\n${contextBlocks}`;
+			}
+			if (recentHistory) {
+				userPrompt += `\n\nÚltimos mensajes (por si hubo un cambio muy reciente):\n${recentHistory}`;
+			}
+		} else {
+			const history = formatMessagesForPrompt(messages);
+			userPrompt = `Convierte en JSON la receta completa acordada en este historial:\n${contextBlocks ? `${contextBlocks}\n\n` : ""}${history}`;
+		}
+
+		return generateThermomixRecipe(userPrompt);
 	}
 
 	/**
@@ -200,6 +244,7 @@ ${rawText.slice(0, 6000)}`,
 		generateRecipeForCookidoo,
 		normalizeRecipeFromRawText,
 		parseProposalResponse,
+		summarizeConversation,
 	};
 }
 

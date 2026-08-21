@@ -6,6 +6,7 @@ const {
 	getConversation,
 	pushConversationMessage,
 	setRecipeReady,
+	setCurrentRecipeText,
 } = require("../store/conversationStore");
 const {
 	setLastCreatedRecipeId,
@@ -31,6 +32,7 @@ const {
 	isStoredRecipeUsable,
 	recipeToUploadPayload,
 } = require("../utils/validateRecipe");
+const { runChatTurn } = require("../services/chatTurn");
 
 function createWebhookRouter({ config, whatsapp, recipeAi }) {
 	const router = express.Router();
@@ -125,17 +127,16 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 						);
 						recipeUrl = result.recipeUrl;
 						title =
-							stored.cookidooNative.content.name ||
-							stored.title ||
-							"Receta";
+							stored.cookidooNative.content.name || stored.title || "Receta";
 					} else {
 						let recipe;
 						if (isStoredRecipeUsable(stored)) {
 							recipe = recipeToUploadPayload(stored);
-						} else if (conversation.messages.length > 0) {
-							recipe = await recipeAi.generateRecipeForCookidoo(
-								conversation.messages,
-							);
+						} else if (
+							conversation.messages.length > 0 ||
+							conversation.currentRecipeText
+						) {
+							recipe = await recipeAi.generateRecipeForCookidoo(conversation);
 							const recipeId = randomUUID();
 							recipeStore.set(recipeId, {
 								id: recipeId,
@@ -184,10 +185,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 
 			if (looksLikeCookidooUrl(userText)) {
 				const recipeId = extractRecipeIdFromUrl(userText);
-				await whatsapp.sendText(
-					from,
-					`Buscando la receta en Cookidoo… ⏳`,
-				);
+				await whatsapp.sendText(from, `Buscando la receta en Cookidoo… ⏳`);
 
 				let credentialsOk = false;
 				try {
@@ -273,47 +271,29 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 						"user",
 						`Adaptación que quiero: ${extraInstruction}`,
 					);
-					const proposalResult =
-						await recipeAi.generateThermomixProposal(
-							getConversation(from).messages,
-						);
-					const proposal =
-						typeof proposalResult === "string"
-							? proposalResult
-							: String(proposalResult?.content ?? "").trim();
-					const isComplete = Boolean(
-						typeof proposalResult === "object" && proposalResult?.isComplete,
+					const { proposal, isComplete, prepError } = await runChatTurn(
+						from,
+						recipeAi,
 					);
-
-					pushConversationMessage(from, "assistant", proposal);
 
 					if (isComplete) {
 						await whatsapp.sendText(
 							from,
 							"Un momento, preparo la receta para Cookidoo… ⏳",
 						);
-						try {
-							const generatedRecipe =
-								await recipeAi.generateRecipeForCookidoo(
-									getConversation(from).messages,
-								);
-							validateRecipeForUpload(generatedRecipe);
-							const newId = randomUUID();
-							recipeStore.set(newId, {
-								id: newId,
-								createdAt: new Date().toISOString(),
-								...generatedRecipe,
-							});
-							setLastCreatedRecipeId(from, newId);
-							setRecipeReady(from, true);
+						if (!prepError) {
 							await whatsapp.sendUploadToCookidooButton(from, proposal);
-						} catch (prepError) {
-							console.error("Preparar receta Cookidoo (URL parcial):", prepError);
-							setRecipeReady(from, false);
-							await whatsapp.sendText(from, proposal);
+						} else {
+							console.error(
+								"Preparar receta Cookidoo (URL parcial):",
+								prepError,
+							);
+							await whatsapp.sendText(
+								from,
+								`${proposal}\n\nNo pude prepararla para subir: ${prepError.message}`,
+							);
 						}
 					} else {
-						setRecipeReady(from, false);
 						await whatsapp.sendText(from, proposal);
 					}
 					return;
@@ -346,6 +326,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				setRecipeReady(from, true);
 
 				const summary = formatRecipeForWhatsApp(recipe);
+				setCurrentRecipeText(from, summary);
 				const intro = `Aquí tienes la receta de Cookidoo *${recipe.title}*.\n\nSi quieres cambiar algo (ingredientes, porciones, sin gluten…) dímelo y la adapto. Si te gusta tal cual, pulsa *Subir a Cookidoo*.\n\n${summary}`;
 
 				pushConversationMessage(from, "user", `[URL Cookidoo: ${recipeId}]`);
@@ -415,6 +396,7 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 				setRecipeReady(from, true);
 
 				const summary = formatRecipeForWhatsApp(recipe);
+				setCurrentRecipeText(from, summary);
 				pushConversationMessage(
 					from,
 					"user",
@@ -426,52 +408,26 @@ function createWebhookRouter({ config, whatsapp, recipeAi }) {
 			}
 
 			pushConversationMessage(from, "user", userText);
-			const conversation = getConversation(from);
-			const proposalResult =
-				await recipeAi.generateThermomixProposal(conversation.messages);
-			const proposal =
-				typeof proposalResult === "string"
-					? proposalResult
-					: String(proposalResult?.content ?? "").trim();
-			const isComplete = Boolean(
-				typeof proposalResult === "object" && proposalResult?.isComplete,
+			const { proposal, isComplete, prepError } = await runChatTurn(
+				from,
+				recipeAi,
 			);
-
-			if (!proposal) {
-				throw new Error("La propuesta de receta llegó vacía");
-			}
-
-			pushConversationMessage(from, "assistant", proposal);
 
 			if (isComplete) {
 				await whatsapp.sendText(
 					from,
 					"Un momento, preparo la receta para Cookidoo… ⏳",
 				);
-				try {
-					const recipe = await recipeAi.generateRecipeForCookidoo(
-						conversation.messages,
-					);
-					validateRecipeForUpload(recipe);
-					const recipeId = randomUUID();
-					recipeStore.set(recipeId, {
-						id: recipeId,
-						createdAt: new Date().toISOString(),
-						...recipe,
-					});
-					setLastCreatedRecipeId(from, recipeId);
-					setRecipeReady(from, true);
+				if (!prepError) {
 					await whatsapp.sendUploadToCookidooButton(from, proposal);
-				} catch (prepError) {
+				} else {
 					console.error("Preparar receta Cookidoo:", prepError);
-					setRecipeReady(from, false);
 					await whatsapp.sendText(
 						from,
-						`No pude preparar la receta para subir: ${prepError.message}\n\nSi quieres, ajusta algo y te la vuelvo a mostrar.`,
+						`No pude preparar la receta para subir: ${prepError.message}\n\nSi quieres, ajusta algo y te la vuelvo a mostrar.\n\n${proposal}`,
 					);
 				}
 			} else {
-				setRecipeReady(from, false);
 				await whatsapp.sendText(from, proposal);
 			}
 

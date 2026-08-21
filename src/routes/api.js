@@ -1,12 +1,7 @@
 const fs = require("node:fs/promises");
 const express = require("express");
-const { randomUUID } = require("node:crypto");
-const {
-	getConversation,
-	pushConversationMessage,
-	setRecipeReady,
-} = require("../store/conversationStore");
-const { setLastCreatedRecipeId } = require("../store/lastRecipeByUser");
+const { pushConversationMessage } = require("../store/conversationStore");
+const { getLastCreatedRecipeId } = require("../store/lastRecipeByUser");
 const { recipeStore } = require("../store/recipeStore");
 const {
 	uploadRecipeToCookidooAccount,
@@ -17,6 +12,7 @@ const {
 	isStoredRecipeUsable,
 	recipeToUploadPayload,
 } = require("../utils/validateRecipe");
+const { runChatTurn } = require("../services/chatTurn");
 
 /**
  * REST API for the mobile app (app-mimi-mobile). Channel-agnostic twin of the
@@ -58,45 +54,23 @@ function createApiRouter({ config, recipeAi }) {
 
 		try {
 			pushConversationMessage(userId, "user", message);
-			const conversation = getConversation(userId);
-
-			const { content: reply, isComplete } =
-				await recipeAi.generateThermomixProposal(conversation.messages, {
-					channel: "app",
-				});
-
-			if (!reply) {
-				throw new Error("La propuesta de receta llegó vacía");
-			}
-
-			pushConversationMessage(userId, "assistant", reply);
+			const {
+				proposal: reply,
+				isComplete,
+				prepError,
+			} = await runChatTurn(userId, recipeAi, { channel: "app" });
 
 			if (!isComplete) {
-				setRecipeReady(userId, false);
 				return res.json({ reply, recipeReady: false });
 			}
 
-			try {
-				const recipe = await recipeAi.generateRecipeForCookidoo(
-					conversation.messages,
-				);
-				validateRecipeForUpload(recipe);
-				const recipeId = randomUUID();
-				recipeStore.set(recipeId, {
-					id: recipeId,
-					createdAt: new Date().toISOString(),
-					...recipe,
-				});
-				setLastCreatedRecipeId(userId, recipeId);
-				setRecipeReady(userId, true);
-				return res.json({ reply, recipeReady: true, recipeId });
-			} catch (prepError) {
-				// La conversación sigue siendo válida: devolvemos la propuesta en texto
-				// aunque no hayamos podido estructurarla para Cookidoo.
+			if (prepError) {
 				console.error("Preparar receta Cookidoo (api):", prepError);
-				setRecipeReady(userId, false);
 				return res.json({ reply, recipeReady: false });
 			}
+
+			const recipeId = getLastCreatedRecipeId(userId);
+			return res.json({ reply, recipeReady: true, recipeId });
 		} catch (error) {
 			console.error("Error en /api/chat:", error);
 			return res.status(502).json({
