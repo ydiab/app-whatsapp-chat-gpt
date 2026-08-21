@@ -13,6 +13,7 @@ const { buildCookidooSession } = require("./cookidooAuth");
 const {
 	parseCookidooApiContent,
 	splitInstructionAndTm,
+	assignIngredientIndicesToRecipe,
 } = require("./cookidooParse");
 
 // ─── helpers de scraping ─────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ function flattenSchemaInstructions(rawSteps) {
 function parseSchemaIngredientLine(line) {
 	const s = stripHtml(line);
 	const m = s.match(
-		/^([\d.,/½¼¾]+\s*(?:g|kg|ml|l|cucharad[a-z]*|pellizco|pizca|unidad[es]*|diente[s]*)?)?\s*(?:de\s+)?(.+)$/i,
+		/^((?:\d+\s*[½¼¾]|[½¼¾]|\d+(?:[.,/]\d+)?)\s*(?:g|kg|ml|l|cucharad[a-z]*|pellizco|pizca|unidad[es]*|diente[s]*)?)?\s*(?:de\s+)?(.+)$/i,
 	);
 	return {
 		quantity: m?.[1]?.trim() || "",
@@ -267,7 +268,7 @@ function normalizeSchemaDotOrg(data) {
 		.map((tag) => String(tag).trim())
 		.filter(Boolean);
 
-	return {
+	const recipe = {
 		title,
 		description,
 		difficulty: "media",
@@ -285,6 +286,7 @@ function normalizeSchemaDotOrg(data) {
 		_partial: steps.length === 0,
 		source: { format: "schema-org", importedAt: new Date().toISOString() },
 	};
+	return assignIngredientIndicesToRecipe(recipe);
 }
 
 // ─── main export ──────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ const {
 	extractJsonText,
 } = require("./openai");
 const { formatMessagesForPrompt } = require("./conversationContext");
+const { assignIngredientIndicesToRecipe } = require("./cookidooParse");
 
 function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 	const ai = { openAiApiKey, openAiModel };
@@ -36,6 +37,8 @@ function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 			.join("")
 			.split(RECETA_MARKER)
 			.join("")
+			.replace(/\s*\|\s*ingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+			.replace(/\bingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
 			.trim();
 	}
 
@@ -158,7 +161,7 @@ PASOS Y COOKIDOO:
   - Cada ingrediente debe aparecer en exactamente UN paso (el paso donde se añade por primera vez).
   - NUNCA repitas la lista completa de ingredientes en todos los pasos.
   - Ejemplo: paso 1 [0,1,2] añadir verduras; paso 2 [] programar 7 min; paso 3 [3] añadir pollo; paso 4 [] cocinar.
-- "text": redáctalo como una receta de Cookidoo oficial, en lenguaje natural y mencionando por su nombre los ingredientes que se añaden en ESE paso (sin cantidades; las cantidades van en la lista de ingredientes y Cookidoo las enlazará). Ejemplos:
+- "text": redáctalo como una receta de Cookidoo oficial, en lenguaje natural y mencionando por su nombre EXACTO de la lista los ingredientes que se añaden en ESE paso (sin cantidades; las cantidades van en la lista de ingredientes y Cookidoo las enlazará). Ejemplos:
    - "Añadir el aceite y la pechuga de pollo en dados y sofreír."
    - "Incorporar la cebolla, el pimiento rojo y el ajo. Trocear."
    - "Programar sin medidor."
@@ -196,7 +199,17 @@ ${userPrompt}
 
 		try {
 			const jsonText = extractJsonText(text);
-			return JSON.parse(jsonText);
+			const parsed = JSON.parse(jsonText);
+			if (Array.isArray(parsed?.steps)) {
+				parsed.steps = parsed.steps.map((step) => ({
+					...step,
+					text: String(step.text || "")
+						.replace(/\s*\|\s*ingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+						.replace(/\bingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+						.trim(),
+				}));
+			}
+			return assignIngredientIndicesToRecipe(parsed);
 		} catch (error) {
 			throw new Error(
 				`No se pudo parsear JSON de receta: ${error.message}. Texto recibido: ${text.slice(0, 500)}`,
@@ -230,6 +243,7 @@ Reglas de tono y formato:
 - Solo contesta a temas de Thermomix y cocina. Si preguntan otra cosa, di amablemente que no estás entrenada para eso.
 - ${formatRule}
 - Los marcadores ${MENSAJE_MARKER}, ${RECETA_MARKER} y ${RECETA_LISTA_MARKER} van solos en su línea; no los incluyas en el texto que lee la usuaria.
+- NUNCA escribas "ingredient_indices", JSON ni números entre corchetes tipo [14, 15] en el texto de la receta.
 - Tono: cálido y resolutivo. Puedes usar algún emoji ocasional si encaja (🍳, ✅…) pero no en cada frase.
 - Preséntate solo la primera vez que la usuaria salude sin contexto previo, con algo como "¡Hola! Soy Mimi, tu asistente Thermomix. ¿Qué cocinamos hoy?" — breve, sin párrafo largo.
 - Decide tú los detalles de menor importancia (porciones por defecto 4, dieta normal, ingredientes de una cocina española) salvo que la usuaria diga lo contrario.

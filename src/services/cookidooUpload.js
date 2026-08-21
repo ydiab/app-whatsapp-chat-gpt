@@ -18,6 +18,10 @@ const {
 } = require("../utils/thermomixCookidoo");
 const { validateRecipeForUpload } = require("../utils/validateRecipe");
 const {
+	assignIngredientIndicesToRecipe,
+	ingredientMentionedInText,
+} = require("./cookidooParse");
+const {
 	buildCookidooSession,
 	SESSION_EXPIRED_MESSAGE,
 	isAuthError,
@@ -57,15 +61,6 @@ async function loadCookidooCredentials(credentialsPath) {
 	};
 }
 
-function normalizeForMatch(s) {
-	return String(s)
-		.toLowerCase()
-		.normalize("NFD")
-		.replace(/\p{M}/gu, "")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
 const ADD_INGREDIENT_PATTERN =
 	/\b(añad|agreg|ech|incorpor|pon(?:er|ga)|vert|deposit|introduc|mezcl|juntar|fund|derret|bati|tamiz|mont|integr|espolvore|amas|dilu)\w*/i;
 
@@ -79,10 +74,6 @@ function isCookingOnlyStep(text, tmMode, mentionsIngredient) {
 		return false;
 	}
 	return Boolean(tmMode);
-}
-
-function stepAddsIngredients(text) {
-	return ADD_INGREDIENT_PATTERN.test(String(text || ""));
 }
 
 /** Cookidoo rechaza anotaciones superpuestas (p. ej. "chocolate" dentro de "chocolate negro"). */
@@ -104,19 +95,6 @@ function dropOverlappingPlacements(placed) {
 		}
 	}
 	return kept.sort((a, b) => a.offset - b.offset);
-}
-
-function ingredientMentionedInText(ingredientName, stepText) {
-	const needle = normalizeForMatch(ingredientName);
-	if (needle.length < 2) {
-		return false;
-	}
-	const hay = normalizeForMatch(stepText);
-	const re = new RegExp(
-		`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\w*`,
-		"i",
-	);
-	return re.test(hay) || hay.includes(needle);
 }
 
 function parseIndices(raw, n) {
@@ -146,45 +124,24 @@ function modelIndicesLookBogus(sortedSteps, n) {
 	});
 }
 
+function stripInternalStepNoise(text) {
+	return String(text || "")
+		.replace(/\s*\|\s*ingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+		.replace(/\bingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+		.trim();
+}
+
 function inferIngredientIndicesPerStep(recipe) {
-	const ingredients = recipe.ingredients || [];
-	const sortedSteps = [...(recipe.steps || [])].sort(
+	const assigned = assignIngredientIndicesToRecipe(recipe);
+	return [...(assigned.steps || [])].sort(
 		(a, b) => (a.order || 0) - (b.order || 0),
-	);
-	const n = ingredients.length;
-	const perStep = sortedSteps.map(() => new Set());
-
-	for (let i = 0; i < n; i++) {
-		const name =
-			ingredients[i].name != null ? String(ingredients[i].name).trim() : "";
-		let bestStep = -1;
-		let bestScore = -1;
-
-		for (let j = 0; j < sortedSteps.length; j++) {
-			const stepText = sortedSteps[j].text || "";
-			if (!ingredientMentionedInText(name, stepText)) {
-				continue;
-			}
-			let score = normalizeForMatch(name).length;
-			if (stepAddsIngredients(stepText)) {
-				score += 100;
-			}
-			if (score > bestScore) {
-				bestScore = score;
-				bestStep = j;
-			}
-		}
-
-		if (bestStep >= 0) {
-			perStep[bestStep].add(i);
-		}
-	}
-
-	return sortedSteps.map((step, j) => ({
+	).map((step, j) => ({
 		order: step.order ?? j + 1,
-		text: step.text != null ? String(step.text).trim() : "",
+		text: stripInternalStepNoise(step.text),
 		tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
-		ingredient_indices: [...perStep[j]],
+		ingredient_indices: Array.isArray(step.ingredient_indices)
+			? step.ingredient_indices
+			: [],
 	}));
 }
 
@@ -197,18 +154,24 @@ function resolveIngredientIndicesPerStep(recipe) {
 		(a, b) => (a.order || 0) - (b.order || 0),
 	);
 	const n = ingredients.length;
+	const assignedCount = sortedSteps.reduce(
+		(sum, step) =>
+			sum + (parseIndices(step.ingredient_indices, n) || []).length,
+		0,
+	);
 	const useInference =
 		modelIndicesLookBogus(sortedSteps, n) ||
 		sortedSteps.every(
 			(s) =>
 				!Array.isArray(s.ingredient_indices) || s.ingredient_indices.length === 0,
-		);
+		) ||
+		assignedCount < Math.ceil(n * 0.4);
 
 	let steps = useInference
 		? inferIngredientIndicesPerStep(recipe)
 		: sortedSteps.map((step, j) => ({
 				order: step.order ?? j + 1,
-				text: step.text != null ? String(step.text).trim() : "",
+				text: stripInternalStepNoise(step.text),
 				tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
 				ingredient_indices:
 					parseIndices(step.ingredient_indices, n) ?? [],
@@ -252,146 +215,251 @@ function buildIngredientRows(recipe) {
 			localId: monotonicUlid(),
 			text,
 			name,
+			quantity: item.quantity != null ? String(item.quantity).trim() : "",
 		};
 	});
 }
 
+function annotationMatchesText(text, ann) {
+	const offset = Number(ann?.position?.offset);
+	const length = Number(ann?.position?.length);
+	if (!Number.isInteger(offset) || !Number.isInteger(length) || length <= 0) {
+		return false;
+	}
+	if (offset < 0 || offset + length > text.length) {
+		return false;
+	}
+	const slice = text.slice(offset, offset + length);
+	if (ann.type === "TTS" || ann.type === "MODE") {
+		return /^\d/.test(slice) && /vel/i.test(slice);
+	}
+	return true;
+}
+
+function keepValidAnnotations(text, annotations) {
+	const valid = (annotations || []).filter((ann) =>
+		annotationMatchesText(text, ann),
+	);
+	return dropOverlappingPlacements(
+		valid.map((ann) => ({
+			...ann,
+			offset: ann.position.offset,
+			length: ann.position.length,
+		})),
+	).map(({ offset, length, ...ann }) => ({
+		...ann,
+		position: { offset, length },
+	}));
+}
+
+function buildIngredientAnnotation(row, offset, length) {
+	return {
+		type: "INGREDIENT",
+		data: {
+			description: row.text,
+		},
+		position: { offset, length },
+	};
+}
+
+function buildInlineIngredientAnnotations(text, indices, rows) {
+	const placed = [];
+	for (const idx of indices) {
+		const row = rows[idx];
+		if (!row?.name) continue;
+		const loc = findIngredientLocationInText(row.name, text);
+		if (!loc) continue;
+		placed.push({ idx, row, offset: loc.offset, length: loc.length });
+	}
+	return dropOverlappingPlacements(placed).map((item) =>
+		buildIngredientAnnotation(item.row, item.offset, item.length),
+	);
+}
+
+function cookingAnnotationForUpload(template, nativeChip, chipOffset) {
+	const data = template.data || {};
+	const out = {
+		type: "TTS",
+		data: {
+			time: data.time,
+			speed: String(data.speed || "1"),
+		},
+		position: { offset: chipOffset, length: nativeChip.length },
+	};
+	if (data.direction === "CCW") {
+		out.data.direction = "CCW";
+	}
+	if (
+		data.temperature?.value &&
+		!(template.type === "MODE" && template.name === "steaming")
+	) {
+		out.data.temperature = {
+			value: String(data.temperature.value),
+			unit: data.temperature.unit || "C",
+		};
+	}
+	return out;
+}
+
+const COOK_VERB_PATTERNS = [
+	/\b(?:turbo)\p{L}*/giu,
+	/\b(?:amas)\p{L}*/giu,
+	/\b(?:tritur|troce|pic[ae]|pulveriz)\p{L}*/giu,
+	/\b(?:mezcl|bati|mont|integra|remov)\p{L}*/giu,
+	/\b(?:sofr|rehog|dor[ae]|poch)\p{L}*/giu,
+	/\b(?:calent)\p{L}*/giu,
+	/\b(?:program|cocin)\p{L}*/giu,
+	/\b(?:emulsiona)\p{L}*/giu,
+	/\b(?:cue[cz]|hirv|reduc|espes|tuest|fund)\p{L}*/giu,
+];
+const AFTER_COOK_PATTERN =
+	/\b(?:retir|reserv|aclar|escurr|dej[ae]|sirv|repart|extiend|cubr|horne[ae])\w*/i;
+
+function findLastCookVerb(sentence) {
+	let best = null;
+	for (const pattern of COOK_VERB_PATTERNS) {
+		const re = new RegExp(pattern.source, "giu");
+		let match = re.exec(sentence);
+		while (match) {
+			const word = match[0];
+			if (/(?:ad|id)[oa]s?$/i.test(word)) {
+				match = re.exec(sentence);
+				continue;
+			}
+			if (!best || match.index >= best.index) {
+				best = { index: match.index, length: match[0].length };
+			}
+			match = re.exec(sentence);
+		}
+	}
+	return best;
+}
+
+function removeCookingChipsFromText(body) {
+	let text = String(body || "");
+	for (let i = 0; i < 8; i++) {
+		const found = findCookingAnnotationsInText(text);
+		if (!found.length) break;
+		const { offset, length } = found[0].position;
+		const before = text.slice(0, offset).replace(/\s+$/, "");
+		let after = text.slice(offset + length);
+		if (!after.startsWith(".")) {
+			after = after.replace(/^\s+/, after ? " " : "");
+		}
+		text = `${before}${after}`.replace(/\s+\./g, ".").replace(/\s{2,}/g, " ");
+	}
+	return text.trim();
+}
+
 /**
- * Construye un paso en el formato que usa Cookidoo en recetas oficiales:
- *  - texto natural mencionando los ingredientes (sin la lista pegada al inicio)
- *  - INGREDIENT annotations sobre cada nombre de ingrediente del texto (negrita/enlace)
- *  - chip de cocción en formato nativo ("8 min/120°C//vel ." con doble barra para
- *    giro inverso e icono cuchara) al final del paso
- *  - TTS / MODE annotation sobre ese chip (icono de giro y de velocidad)
- *
- * Si algún ingrediente asignado al paso NO aparece en el texto, se prepende una
- * frase "Añadir 6 g de aceite, 140 g de pechuga de pollo. " para conservar el
- * enlace, manteniendo un tono natural.
+ * El verbo queda en prosa ("Mezcla") y justo después va el chip nativo
+ * ("20 seg/vel 3"), que es lo único que Cookidoo pone en negrita y enlaza
+ * al programa de la máquina.
+ */
+function placeNativeChipInBody(body, nativeChip) {
+	if (!nativeChip) {
+		return { text: body, chipOffset: -1 };
+	}
+
+	const text = removeCookingChipsFromText(body);
+
+	let best = null;
+	let searchFrom = 0;
+	while (searchFrom < text.length) {
+		const dot = text.indexOf(".", searchFrom);
+		const end = dot < 0 ? text.length : dot;
+		const sentence = text.slice(searchFrom, end);
+		if (/^\s*mientras\b/i.test(sentence)) {
+			if (dot < 0) break;
+			searchFrom = dot + 1;
+			while (text[searchFrom] === " ") searchFrom += 1;
+			continue;
+		}
+		const verb = findLastCookVerb(sentence);
+		const isAfter = AFTER_COOK_PATTERN.test(sentence) && !verb;
+		if (verb && !isAfter) {
+			best = { sentenceStart: searchFrom, verb };
+		}
+		if (dot < 0) break;
+		searchFrom = dot + 1;
+		while (text[searchFrom] === " ") searchFrom += 1;
+	}
+
+	if (best) {
+		const afterVerb = best.sentenceStart + best.verb.index + best.verb.length;
+		const out = `${text.slice(0, afterVerb)} ${nativeChip}${text.slice(afterVerb)}`;
+		return { text: out, chipOffset: afterVerb + 1 };
+	}
+
+	const firstDot = text.indexOf(".");
+	if (firstDot > 0) {
+		const out = `${text.slice(0, firstDot)} ${nativeChip}${text.slice(firstDot)}`;
+		return { text: out, chipOffset: firstDot + 1 };
+	}
+
+	const sep = text ? " " : "";
+	return { text: text + sep + nativeChip, chipOffset: text.length + sep.length };
+}
+
+/**
+ * Paso al estilo Cookidoo oficial: prosa con el nombre del ingrediente
+ * enlazado in situ (sin repetir "100 g de…" al inicio) y chip TTS en la
+ * frase de cocción. No se inventan secciones.
  *
  * @param {{ text: string, tm_mode?: string, ingredient_indices?: number[] }} step
- * @param {{ text: string, localId: string, name: string }[]} rows
- * @param {{ withAnnotations?: boolean }} opts
+ * @param {{ text: string, localId: string, name: string, quantity?: string }[]} rows
+ * @param {{ withAnnotations?: boolean, includeCookingAnnotations?: boolean }} opts
  */
 function buildStepInstruction(step, rows, opts = {}) {
 	const withAnnotations = opts.withAnnotations !== false;
+	const includeCookingAnnotations = opts.includeCookingAnnotations !== false;
 	const indices = [...new Set(step.ingredient_indices || [])]
 		.filter((i) => i >= 0 && i < rows.length)
 		.sort((a, b) => a - b);
 
-	const body = step.text ? String(step.text).trim() : "";
-	const userChip = resolveTmModeChip(step);
-
-	let chipAnnotationTemplate = null;
+	const body = stripInternalStepNoise(step.text);
+	const userChip = resolveTmModeChip({ tm_mode: step.tm_mode, text: "" })
+		|| resolveTmModeChip(step);
+	let chipTemplate = null;
 	let nativeChip = null;
 	if (userChip) {
 		const found = findCookingAnnotationsInText(userChip);
 		if (found.length > 0) {
-			chipAnnotationTemplate = found[0];
-			nativeChip = buildCookidooNativeChip(chipAnnotationTemplate);
+			chipTemplate = found[0];
+			nativeChip = buildCookidooNativeChip(chipTemplate);
 		}
 	}
 
-	const placed = [];
-	const missing = [];
-	for (const idx of indices) {
-		const row = rows[idx];
-		const loc = body
-			? findIngredientLocationInText(row.name, body)
-			: null;
-		if (loc) {
-			placed.push({ idx, row, offset: loc.offset, length: loc.length });
-		} else {
-			missing.push({ idx, row });
-		}
-	}
-	const nonOverlapping = dropOverlappingPlacements(placed);
-	for (const item of placed) {
-		if (!nonOverlapping.some((kept) => kept.idx === item.idx)) {
-			missing.push({ idx: item.idx, row: item.row });
-		}
-	}
-	placed.splice(0, placed.length, ...nonOverlapping);
-
-	let prefix = "";
-	const prefixAnns = [];
-	if (missing.length > 0) {
-		const startWord = "Añadir ";
-		let cursor = startWord.length;
-		let prefixBody = startWord;
-		for (let k = 0; k < missing.length; k++) {
-			const line = missing[k].row.text;
-			prefixAnns.push({
-				idx: missing[k].idx,
-				offset: cursor,
-				length: line.length,
-			});
-			prefixBody += line;
-			cursor += line.length;
-			if (k < missing.length - 1) {
-				prefixBody += ", ";
-				cursor += 2;
-			}
-		}
-		prefixBody += body ? ". " : ".";
-		prefix = prefixBody;
-	}
-
-	const textBody = prefix + body;
-	const chipSep = nativeChip && textBody ? " " : "";
-	const text = (textBody + chipSep + (nativeChip || "")).trim() || "paso";
+	const placed = placeNativeChipInBody(body, nativeChip);
+	const text = placed.text || "paso";
 
 	const instruction = { type: "STEP", text };
-
 	if (!withAnnotations) {
 		return instruction;
 	}
 
-	const annotations = [];
-
-	for (const pa of prefixAnns) {
-		annotations.push({
-			type: "INGREDIENT",
-			position: { offset: pa.offset, length: pa.length },
-			data: {
-				description: {
-					text: rows[pa.idx].text,
-					annotations: [],
-				},
-			},
-		});
+	const annotations = buildInlineIngredientAnnotations(text, indices, rows);
+	if (
+		includeCookingAnnotations &&
+		chipTemplate &&
+		nativeChip &&
+		placed.chipOffset >= 0 &&
+		text.slice(placed.chipOffset, placed.chipOffset + nativeChip.length) ===
+			nativeChip
+	) {
+		annotations.push(
+			cookingAnnotationForUpload(
+				chipTemplate,
+				nativeChip,
+				placed.chipOffset,
+			),
+		);
 	}
 
-	const prefixLen = prefix.length;
-	for (const p of placed) {
-		annotations.push({
-			type: "INGREDIENT",
-			position: {
-				offset: prefixLen + p.offset,
-				length: p.length,
-			},
-			data: {
-				description: {
-					text: p.row.text,
-					annotations: [],
-				},
-			},
-		});
+	const cleaned = keepValidAnnotations(text, annotations);
+	if (cleaned.length > 0) {
+		instruction.annotations = cleaned;
 	}
-
-	if (chipAnnotationTemplate && nativeChip) {
-		const chipOffset = textBody.length + chipSep.length;
-		const { position: _ignored, ...rest } = chipAnnotationTemplate;
-		annotations.push({
-			...rest,
-			position: { offset: chipOffset, length: nativeChip.length },
-		});
-	}
-
-	annotations.sort((a, b) => a.position.offset - b.position.offset);
-	if (annotations.length > 0) {
-		instruction.annotations = annotations;
-	}
-
 	return instruction;
 }
 
@@ -409,12 +477,20 @@ function cleanCookidooInstructions(instructions) {
 	return (Array.isArray(instructions) ? instructions : [])
 		.filter((s) => s?.type === "STEP" || s?.text)
 		.map((step) => {
+			const rawText = String(step.text || "");
+			const hasAnns =
+				Array.isArray(step.annotations) && step.annotations.length > 0;
 			const out = {
 				type: "STEP",
-				text: String(step.text || "").trim() || "paso",
+				text: hasAnns ? rawText : rawText.trim() || "paso",
 			};
-			if (Array.isArray(step.annotations) && step.annotations.length > 0) {
-				out.annotations = step.annotations;
+			if (hasAnns) {
+				const cleaned = keepValidAnnotations(out.text, step.annotations);
+				if (cleaned.length > 0) {
+					out.annotations = cleaned;
+				} else {
+					out.text = rawText.trim() || "paso";
+				}
 			}
 			return out;
 		});
@@ -681,20 +757,49 @@ async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPat
 
 	await delay(2000);
 
-	const patchInstructions = (withAnnotations) =>
+	const patchInstructions = (opts) =>
 		patchJson(patchUrl, authHeaders, {
 			instructions: enrichedSteps.map((step) =>
-				buildStepInstruction(step, rows, { withAnnotations }),
+				buildStepInstruction(step, rows, opts),
 			),
 		});
 
-	let stepRes = await patchInstructions(true);
+	let stepRes = await patchInstructions({ withAnnotations: true });
+	if (!stepRes.ok && stepRes.status === 400) {
+		console.error(
+			"Cookidoo rechazó ingredientes+TTS; reintento solo con programas de la máquina:",
+			stepRes.responseText.slice(0, 500),
+		);
+		stepRes = await patchJson(patchUrl, authHeaders, {
+			instructions: enrichedSteps.map((step) => {
+				const built = buildStepInstruction(step, rows, {
+					withAnnotations: true,
+					includeCookingAnnotations: true,
+				});
+				if (Array.isArray(built.annotations)) {
+					built.annotations = built.annotations.filter((a) => a.type === "TTS");
+					if (built.annotations.length === 0) delete built.annotations;
+				}
+				return built;
+			}),
+		});
+	}
+	if (!stepRes.ok && stepRes.status === 400) {
+		console.error(
+			"Cookidoo rechazó los programas TTS; reintento solo con enlaces de ingredientes:",
+			stepRes.responseText.slice(0, 500),
+		);
+		stepRes = await patchInstructions({
+			withAnnotations: true,
+			includeCookingAnnotations: false,
+		});
+	}
 	if (!stepRes.ok && stepRes.status === 400) {
 		console.error(
 			"Cookidoo rechazó los enlaces de ingredientes en los pasos; reintento sin anotaciones:",
 			stepRes.responseText.slice(0, 500),
 		);
-		stepRes = await patchInstructions(false);
+		stepRes = await patchInstructions({ withAnnotations: false });
 	}
 
 	if (!stepRes.ok && stepRes.status !== 204) {

@@ -136,25 +136,124 @@ function splitInstructionAndTm(instruction) {
 	return { text, tm_mode };
 }
 
+const INGREDIENT_STOPWORDS = new Set([
+	"de",
+	"del",
+	"en",
+	"con",
+	"tipo",
+	"el",
+	"la",
+	"los",
+	"las",
+	"un",
+	"una",
+	"unos",
+	"unas",
+	"al",
+	"molida",
+	"molido",
+	"rallado",
+	"rallada",
+	"fresco",
+	"fresca",
+	"seco",
+	"seca",
+	"cocido",
+	"cocida",
+	"conserva",
+]);
+
+function significantNameTokens(name) {
+	const cleaned = normalizeLine(name).replace(/[()]/g, " ");
+	return cleaned
+		.split(/\s+/)
+		.filter((word) => word.length >= 4 && !INGREDIENT_STOPWORDS.has(word));
+}
+
+function ingredientMentionedInText(ingredientName, stepText) {
+	const name = String(ingredientName || "").trim();
+	const hay = normalizeLine(stepText);
+	if (!name || !hay) {
+		return false;
+	}
+	const full = normalizeLine(name.replace(/\s*\(.*?\)\s*/g, " "));
+	if (full.length >= 3 && hay.includes(full)) {
+		return true;
+	}
+	const tokens = significantNameTokens(name);
+	if (tokens.some((token) => hay.includes(token))) {
+		return true;
+	}
+	// Nombres cortos ("sal") y sinónimos habituales de Cookidoo.
+	if (full.length >= 3 && new RegExp(`\\b${full}\\b`).test(hay)) {
+		return true;
+	}
+	if (/\bjamon\b/.test(full) && /\bjamon\b/.test(hay)) {
+		return true;
+	}
+	if (
+		/\b(pasta|tortellini|ravioli)\b/.test(full) &&
+		/\b(pasta|tortellini|ravioli|raviolis)\b/.test(hay)
+	) {
+		return true;
+	}
+	return false;
+}
+
 function inferIngredientIndicesForStep(stepText, ingredients) {
 	const indices = [];
-	const hay = normalizeLine(stepText);
 	for (let i = 0; i < ingredients.length; i++) {
-		const fullName = normalizeLine(ingredients[i].name);
-		if (fullName.length < 3) continue;
-		// Prueba el nombre completo primero, luego prefijos progresivamente
-		// más cortos (p. ej. "esparragos trigueros" → "esparragos").
-		const words = fullName.split(/\s+/);
-		let matched = false;
-		for (let len = words.length; len >= 1 && !matched; len--) {
-			const candidate = words.slice(0, len).join(" ");
-			if (candidate.length >= 3 && hay.includes(candidate)) {
-				matched = true;
+		if (ingredientMentionedInText(ingredients[i]?.name, stepText)) {
+			indices.push(i);
+		}
+	}
+	return indices;
+}
+
+/**
+ * Asigna cada ingrediente al primer paso (en orden) que lo menciona.
+ * Duplicados ("sal" dos veces) van a pasos distintos si ambos lo nombran.
+ */
+function assignIngredientIndicesToRecipe(recipe) {
+	const ingredients = Array.isArray(recipe?.ingredients)
+		? recipe.ingredients
+		: [];
+	const steps = [...(recipe?.steps || [])].sort(
+		(a, b) => (a.order || 0) - (b.order || 0),
+	);
+	if (ingredients.length === 0 || steps.length === 0) {
+		return recipe;
+	}
+
+	const perStep = steps.map(() => []);
+	const lastStepByName = new Map();
+
+	for (let i = 0; i < ingredients.length; i++) {
+		const key = normalizeLine(ingredients[i]?.name || "") || String(i);
+		const matches = [];
+		for (let j = 0; j < steps.length; j++) {
+			if (ingredientMentionedInText(ingredients[i]?.name, steps[j].text)) {
+				matches.push(j);
 			}
 		}
-		if (matched) indices.push(i);
+		const previous = lastStepByName.has(key) ? lastStepByName.get(key) : -1;
+		const chosen =
+			matches.find((j) => j > previous) ?? matches[0] ?? null;
+		if (chosen == null) {
+			continue;
+		}
+		perStep[chosen].push(i);
+		lastStepByName.set(key, chosen);
 	}
-	return [...new Set(indices)].sort((a, b) => a - b);
+
+	return {
+		...recipe,
+		steps: steps.map((step, j) => ({
+			...step,
+			ingredient_indices: perStep[j],
+		})),
+	};
 }
 
 function ingredientDescriptionFromAnnotation(ann) {
@@ -532,6 +631,8 @@ module.exports = {
 	extractCookidooUrl,
 	extractRecipeIdFromUrl,
 	splitInstructionAndTm,
+	ingredientMentionedInText,
+	assignIngredientIndicesToRecipe,
 	unwrapCookidooPayload,
 	isCookidooApiContent,
 };

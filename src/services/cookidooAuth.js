@@ -180,14 +180,14 @@ async function buildCookidooSession(creds, cookiesPath) {
 	const baseOrigin = new URL(creds.cookidooBaseUrl).origin;
 
 	return {
-		// La API ahora vive en el mismo host que la web (cookidoo.es), las rutas
-		// son idénticas a las del antiguo host móvil.
 		apiBase: baseOrigin,
 		baseOrigin,
 		authHeaders: {
 			Accept: "application/json",
 			"Content-Type": "application/json",
 			Cookie: cookieHeader,
+			Origin: baseOrigin,
+			Referer: `${baseOrigin}/`,
 		},
 	};
 }
