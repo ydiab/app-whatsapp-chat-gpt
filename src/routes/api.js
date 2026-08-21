@@ -1,7 +1,6 @@
 const fs = require("node:fs/promises");
 const express = require("express");
 const { pushConversationMessage } = require("../store/conversationStore");
-const { getLastCreatedRecipeId } = require("../store/lastRecipeByUser");
 const { recipeStore } = require("../store/recipeStore");
 const {
 	uploadRecipeToCookidooAccount,
@@ -52,13 +51,50 @@ function createApiRouter({ config, recipeAi }) {
 				.json({ error: "userId y message son obligatorios" });
 		}
 
+		const wantsStream =
+			String(req.headers.accept || "").includes("ndjson") ||
+			String(req.query.stream || "") === "1";
+
+		const emit = (event) => {
+			if (!wantsStream || res.writableEnded) {
+				return;
+			}
+			res.write(`${JSON.stringify(event)}\n`);
+		};
+
+		if (wantsStream) {
+			res.status(200);
+			res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+			res.setHeader("Cache-Control", "no-cache, no-transform");
+			res.setHeader("Connection", "keep-alive");
+			res.setHeader("X-Accel-Buffering", "no");
+			res.flushHeaders();
+		}
+
 		try {
 			pushConversationMessage(userId, "user", message);
 			const {
 				proposal: reply,
 				isComplete,
 				prepError,
-			} = await runChatTurn(userId, recipeAi, { channel: "app" });
+				recipeId,
+			} = await runChatTurn(userId, recipeAi, {
+				channel: "app",
+				onEvent: wantsStream ? emit : undefined,
+			});
+
+			if (wantsStream) {
+				if (isComplete && prepError) {
+					console.error("Preparar receta Cookidoo (api):", prepError);
+					emit({
+						type: "error",
+						error:
+							"No pude preparar la receta para Cookidoo. Inténtalo de nuevo en un momento.",
+					});
+				}
+				emit({ type: "done" });
+				return res.end();
+			}
 
 			if (!isComplete) {
 				return res.json({ reply, recipeReady: false });
@@ -72,7 +108,6 @@ function createApiRouter({ config, recipeAi }) {
 				});
 			}
 
-			const recipeId = getLastCreatedRecipeId(userId);
 			if (!recipeId) {
 				console.error("Receta completa pero sin recipeId (api)");
 				return res.json({ reply, recipeReady: false });
@@ -80,6 +115,15 @@ function createApiRouter({ config, recipeAi }) {
 			return res.json({ reply, recipeReady: true, recipeId });
 		} catch (error) {
 			console.error("Error en /api/chat:", error);
+			if (wantsStream) {
+				emit({
+					type: "error",
+					error:
+						"Tuve un problema generando la respuesta. Inténtalo de nuevo con más detalle.",
+				});
+				emit({ type: "done" });
+				return res.end();
+			}
 			return res.status(502).json({
 				error:
 					"Tuve un problema generando la respuesta. Inténtalo de nuevo con más detalle.",

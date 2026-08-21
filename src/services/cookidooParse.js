@@ -387,6 +387,7 @@ function parseMimiExportContent(meta, content) {
 
 	const servings = parseYieldToServings(content.yield ?? meta.yield);
 	const nutrition = content.nutrition;
+	const calories_per_serving = Number(nutrition?.caloriesPerServing) || undefined;
 	const nutrition_notes = nutrition
 		? `~${nutrition.caloriesPerServing ?? "?"} kcal/porción · P ${nutrition.protein ?? "?"} · G ${nutrition.fat ?? "?"} · HC ${nutrition.carbohydrates ?? "?"}`
 		: "";
@@ -401,6 +402,7 @@ function parseMimiExportContent(meta, content) {
 		steps,
 		tags: Array.isArray(content.tags) ? content.tags : ["importada"],
 		nutrition_notes,
+		...(calories_per_serving ? { calories_per_serving } : {}),
 		source: {
 			format: "mimi-export",
 			importedAt: new Date().toISOString(),

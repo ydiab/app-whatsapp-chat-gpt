@@ -4,6 +4,10 @@ const UPLOAD_TO_COOKIDOO_BUTTON_ID = "upload_to_cookidoo";
 /** Línea que el modelo añade al final cuando la receta está completa (no se muestra al usuario). */
 const RECETA_LISTA_MARKER = "[RECETA_LISTA]";
 
+/** Bloque de charla (sin receta) y bloque de receta en texto, para enviarlos por separado. */
+const MENSAJE_MARKER = "[MENSAJE]";
+const RECETA_MARKER = "[RECETA]";
+
 /** A partir de cuántos mensajes recientes se resume el bloque anterior. */
 const COMPACT_THRESHOLD = 12;
 
@@ -16,6 +20,8 @@ const MAX_CONVERSATION_MESSAGES = 16;
 module.exports = {
 	UPLOAD_TO_COOKIDOO_BUTTON_ID,
 	RECETA_LISTA_MARKER,
+	MENSAJE_MARKER,
+	RECETA_MARKER,
 	COMPACT_THRESHOLD,
 	KEEP_RECENT_MESSAGES,
 	MAX_CONVERSATION_MESSAGES,

@@ -10,20 +10,61 @@ const { recipeStore } = require("../store/recipeStore");
 const { validateRecipeForUpload } = require("../utils/validateRecipe");
 const { prepareConversationForAi } = require("./conversationContext");
 
+async function prepareStructuredRecipe(userId, recipeAi, conversation) {
+	let recipe = null;
+	let prepError = null;
+
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			recipe = await recipeAi.generateRecipeForCookidoo(conversation);
+			validateRecipeForUpload(recipe);
+			const recipeId = randomUUID();
+			recipeStore.set(recipeId, {
+				id: recipeId,
+				createdAt: new Date().toISOString(),
+				...recipe,
+			});
+			setLastCreatedRecipeId(userId, recipeId);
+			setRecipeReady(userId, true);
+			return { recipe, prepError: null, recipeId };
+		} catch (error) {
+			prepError = error;
+			setRecipeReady(userId, false);
+		}
+	}
+
+	return { recipe, prepError, recipeId: null };
+}
+
 /**
  * Compacta historial si hace falta, pide propuesta a Mimi y opcionalmente
  * estructura la receta para Cookidoo cuando está completa.
+ *
+ * `onEvent` (app): `{ type: 'reply'|'recipeText'|'recipeCard', text?, recipeId? }`
+ * se llama en cuanto hay un trozo listo, sin esperar al resto.
  */
-async function runChatTurn(userId, recipeAi, { channel = "whatsapp" } = {}) {
+async function runChatTurn(userId, recipeAi, { channel = "whatsapp", onEvent } = {}) {
 	const conversation = getConversation(userId);
 	await prepareConversationForAi(conversation, recipeAi);
 
+	let introFlushed = false;
 	const proposalResult = await recipeAi.generateThermomixProposal(
 		conversation,
 		{
 			channel,
+			onPartial: ({ intro }) => {
+				if (!intro || introFlushed) {
+					return;
+				}
+				introFlushed = true;
+				pushConversationMessage(userId, "assistant", intro);
+				onEvent?.({ type: "reply", text: intro });
+			},
 		},
 	);
+
+	const intro = String(proposalResult?.intro ?? "").trim();
+	const recipeText = String(proposalResult?.recipeText ?? "").trim();
 	const proposal =
 		typeof proposalResult === "string"
 			? proposalResult
@@ -36,34 +77,35 @@ async function runChatTurn(userId, recipeAi, { channel = "whatsapp" } = {}) {
 		throw new Error("La propuesta de receta llegó vacía");
 	}
 
-	pushConversationMessage(userId, "assistant", proposal);
+	if (!introFlushed && intro) {
+		pushConversationMessage(userId, "assistant", intro);
+		onEvent?.({ type: "reply", text: intro });
+	}
+
+	if (recipeText) {
+		pushConversationMessage(userId, "assistant", recipeText);
+		onEvent?.({ type: "recipeText", text: recipeText });
+	} else if (!introFlushed && !intro) {
+		pushConversationMessage(userId, "assistant", proposal);
+		onEvent?.({ type: "reply", text: proposal });
+	}
 
 	if (isComplete) {
-		setCurrentRecipeText(userId, proposal);
+		setCurrentRecipeText(userId, recipeText || proposal);
 	}
 
 	let recipe = null;
 	let prepError = null;
+	let recipeId = null;
 
 	if (isComplete) {
-		for (let attempt = 0; attempt < 2; attempt++) {
-			try {
-				recipe = await recipeAi.generateRecipeForCookidoo(conversation);
-				validateRecipeForUpload(recipe);
-				const recipeId = randomUUID();
-				recipeStore.set(recipeId, {
-					id: recipeId,
-					createdAt: new Date().toISOString(),
-					...recipe,
-				});
-				setLastCreatedRecipeId(userId, recipeId);
-				setRecipeReady(userId, true);
-				prepError = null;
-				break;
-			} catch (error) {
-				prepError = error;
-				setRecipeReady(userId, false);
-			}
+		({ recipe, prepError, recipeId } = await prepareStructuredRecipe(
+			userId,
+			recipeAi,
+			conversation,
+		));
+		if (recipeId) {
+			onEvent?.({ type: "recipeCard", recipeId });
 		}
 	} else {
 		setRecipeReady(userId, false);
@@ -72,9 +114,12 @@ async function runChatTurn(userId, recipeAi, { channel = "whatsapp" } = {}) {
 	return {
 		conversation,
 		proposal,
+		intro,
+		recipeText,
 		isComplete,
 		recipe,
 		prepError,
+		recipeId,
 	};
 }
 

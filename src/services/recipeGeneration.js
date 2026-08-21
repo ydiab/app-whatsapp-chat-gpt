@@ -1,6 +1,11 @@
-const { RECETA_LISTA_MARKER } = require("../constants");
+const {
+	RECETA_LISTA_MARKER,
+	MENSAJE_MARKER,
+	RECETA_MARKER,
+} = require("../constants");
 const {
 	callOpenAI,
+	callOpenAIStream,
 	extractTextFromOpenAIResponse,
 	extractJsonText,
 } = require("./openai");
@@ -23,12 +28,59 @@ function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 		return hasIngredients && hasSteps;
 	}
 
+	function stripMarkers(text) {
+		return String(text || "")
+			.split(RECETA_LISTA_MARKER)
+			.join("")
+			.split(MENSAJE_MARKER)
+			.join("")
+			.split(RECETA_MARKER)
+			.join("")
+			.trim();
+	}
+
+	function splitUnmarkedContent(content) {
+		const parts = content
+			.split(/\n\s*\n/)
+			.map((part) => part.trim())
+			.filter(Boolean);
+		if (parts.length < 2) {
+			return { intro: content, recipeText: "" };
+		}
+		const intro = parts[0];
+		const rest = parts.slice(1).join("\n\n");
+		if (intro.length < 280 && looksLikeCompleteRecipe(rest)) {
+			return { intro, recipeText: rest };
+		}
+		return { intro: content, recipeText: "" };
+	}
+
 	function parseProposalResponse(text) {
 		const raw = String(text || "").trim();
-		const content = raw.split(RECETA_LISTA_MARKER).join("").trim();
+		const withoutLista = raw.split(RECETA_LISTA_MARKER).join("");
+		const recipeAt = withoutLista.indexOf(RECETA_MARKER);
+
+		let intro = "";
+		let recipeText = "";
+		if (recipeAt !== -1) {
+			intro = stripMarkers(withoutLista.slice(0, recipeAt));
+			recipeText = stripMarkers(
+				withoutLista.slice(recipeAt + RECETA_MARKER.length),
+			);
+		} else {
+			const unmarked = stripMarkers(withoutLista);
+			if (looksLikeCompleteRecipe(unmarked)) {
+				({ intro, recipeText } = splitUnmarkedContent(unmarked));
+			} else {
+				intro = unmarked;
+			}
+		}
+
+		const content = [intro, recipeText].filter(Boolean).join("\n\n");
 		const isComplete =
-			raw.includes(RECETA_LISTA_MARKER) || looksLikeCompleteRecipe(content);
-		return { content, isComplete };
+			raw.includes(RECETA_LISTA_MARKER) ||
+			looksLikeCompleteRecipe(recipeText || content);
+		return { content, intro, recipeText, isComplete };
 	}
 
 	function buildContextBlocks({ summary, currentRecipeText }) {
@@ -78,6 +130,7 @@ Devuelve EXCLUSIVAMENTE JSON válido (sin markdown) con este esquema:
   "difficulty": "facil|media|avanzada",
   "total_time_min": number,
   "servings": number,
+  "calories_per_serving": number,
   "ingredients": [
     { "name": "string", "quantity": "string" }
   ],
@@ -87,6 +140,10 @@ Devuelve EXCLUSIVAMENTE JSON válido (sin markdown) con este esquema:
   "tags": ["string"],
   "nutrition_notes": "string"
 }
+CALORÍAS:
+- "calories_per_serving": entero estimado de kcal por ración (obligatorio). Basa la cifra en los ingredientes y cantidades; no pongas 0 ni lo dejes vacío.
+- "nutrition_notes": una frase breve opcional (p. ej. "Estimación ~420 kcal/ración").
+
 INGREDIENTES (unidades estándar de cocina):
 - Ingredientes que se pesan en la báscula (verduras, carnes, pescados, pasta, arroz, harina, quesos, líquidos...): quantity en gramos, como "120 g" (nada de "1 pimiento" ni "1 pimiento (120g) mediano"). Líquidos: convierte ml a gramos aproximados (agua/leche/caldo 1 ml ≈ 1 g).
 - Ingredientes con unidad natural propia: usa esa unidad, NO gramos:
@@ -149,7 +206,7 @@ ${userPrompt}
 
 	async function generateThermomixProposal(
 		conversation,
-		{ channel = "whatsapp" } = {},
+		{ channel = "whatsapp", onPartial } = {},
 	) {
 		const { messages, summary, currentRecipeText } = conversation;
 		const history = formatMessagesForPrompt(messages);
@@ -172,6 +229,7 @@ Reglas de tono y formato:
 - Responde SIEMPRE en español. No uses JSON ni código.
 - Solo contesta a temas de Thermomix y cocina. Si preguntan otra cosa, di amablemente que no estás entrenada para eso.
 - ${formatRule}
+- Los marcadores ${MENSAJE_MARKER}, ${RECETA_MARKER} y ${RECETA_LISTA_MARKER} van solos en su línea; no los incluyas en el texto que lee la usuaria.
 - Tono: cálido y resolutivo. Puedes usar algún emoji ocasional si encaja (🍳, ✅…) pero no en cada frase.
 - Preséntate solo la primera vez que la usuaria salude sin contexto previo, con algo como "¡Hola! Soy Mimi, tu asistente Thermomix. ¿Qué cocinamos hoy?" — breve, sin párrafo largo.
 - Decide tú los detalles de menor importancia (porciones por defecto 4, dieta normal, ingredientes de una cocina española) salvo que la usuaria diga lo contrario.
@@ -186,26 +244,48 @@ RECETAS IMPORTADAS / QUE LA USUARIA QUIERE SUBIR (MUY IMPORTANTE):
 
 Fases de la conversación:
 1) Saludo vacío sin pista de receta → preséntate brevemente y pregunta "¿qué cocinamos hoy?"
-2) En cuanto sepas qué quiere cocinar, muestra la RECETA COMPLETA en un mensaje con:
+2) En cuanto sepas qué quiere cocinar, responde EXACTAMENTE con este formato (cada marcador en su propia línea):
+${MENSAJE_MARKER}
+1-3 frases cercanas: confirma qué vas a cocinar (nombre, raciones si aplica). SIN lista de ingredientes ni pasos.
+${RECETA_MARKER}
+La receta completa:
    - Nombre de la receta
    - Porciones y tiempo total
    - Calorías aproximadas por porción (si puedes estimarlas)
    - Ingredientes con unidades estándar de cocina: en gramos lo que se pesa en la báscula ("120 g de pimiento rojo", nunca "1 pimiento"); en su unidad natural lo que la tiene ("2 dientes de ajo", "2 huevos", "1 hoja de laurel"); sal, pimienta y especias siempre en cucharaditas/cucharadas ("1 cucharadita de sal"), nunca "al gusto" ni "una pizca"
    - Pasos numerados para Thermomix (tiempo, temperatura, velocidad, giro inverso cuando aplique)
    - Una frase final amigable${isApp ? ' tipo "¿Quieres cambiar algo?" — NO menciones el botón Subir a Cookidoo; la app lo muestra sola' : ' tipo "¿Quieres cambiar algo? Si te gusta, dale a Subir a Cookidoo."'}
-   - En la ÚLTIMA línea escribe exactamente: ${RECETA_LISTA_MARKER}
-3) Si la usuaria pide cambios, aplícalos y muestra la receta completa de nuevo con ${RECETA_LISTA_MARKER}. Sin preguntas abiertas.
+${RECETA_LISTA_MARKER}
+3) Si la usuaria pide cambios, aplícalos y vuelve a usar ${MENSAJE_MARKER} + ${RECETA_MARKER} + ${RECETA_LISTA_MARKER}. Sin preguntas abiertas.
 
-OMITE ${RECETA_LISTA_MARKER} solo si:
-- Es un saludo vacío (fase 1).
+OMITE ${RECETA_MARKER} y ${RECETA_LISTA_MARKER} solo si:
+- Es un saludo vacío (fase 1) — entonces solo ${MENSAJE_MARKER} y tu texto.
 - Tienes que hacer una pregunta crítica sin la cual no puedes proponer nada (p. ej. alergia grave).
 
 ${contextBlocks ? `${contextBlocks}\n\n` : ""}Historial reciente:
 ${history || "(sin mensajes recientes)"}
 `.trim();
 
-		const data = await callOpenAI({ ...ai, input: prompt });
-		const text = extractTextFromOpenAIResponse(data);
+		let introEmitted = false;
+		const text = await callOpenAIStream({
+			...ai,
+			input: prompt,
+			onText: (fullSoFar) => {
+				if (introEmitted || !onPartial) {
+					return;
+				}
+				const recipeAt = fullSoFar.indexOf(RECETA_MARKER);
+				if (recipeAt === -1) {
+					return;
+				}
+				const intro = parseProposalResponse(fullSoFar.slice(0, recipeAt)).intro;
+				if (!intro) {
+					return;
+				}
+				introEmitted = true;
+				onPartial({ intro });
+			},
+		});
 		if (!text) {
 			throw new Error("OpenAI no devolvió propuesta de receta");
 		}
