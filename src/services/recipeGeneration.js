@@ -5,6 +5,7 @@ const {
 } = require("../constants");
 const {
 	callOpenAI,
+	callOpenAIVision,
 	callOpenAIStream,
 	extractTextFromOpenAIResponse,
 	extractJsonText,
@@ -351,11 +352,70 @@ ${rawText.slice(0, 6000)}`,
 		);
 	}
 
+	/**
+	 * Extrae, a partir de una o varias capturas de pantalla de Cookidoo, la receta
+	 * TAL CUAL aparece (ingredientes, cantidades y pasos), al esquema JSON interno.
+	 * No inventa ni "mejora" nada; las adaptaciones que pida la usuaria se aplican
+	 * después en el flujo normal (igual que en la importación por URL).
+	 * @param {string[]} images data URLs (`data:image/png;base64,…`) o URLs http(s).
+	 */
+	async function extractRecipeFromImages(images) {
+		const prompt = `
+Eres un lector de recetas de Cookidoo. Te paso una o varias CAPTURAS DE PANTALLA que son páginas consecutivas de UNA MISMA receta (ingredientes y pasos repartidos entre varias pantallas). Únelas en una sola receta.
+
+Transcribe EXACTAMENTE lo que se ve. NO inventes, NO completes, NO "mejores" ni cambies cantidades, nombres ni pasos. Si un dato no aparece en las capturas, omítelo (no lo adivines).
+
+Devuelve EXCLUSIVAMENTE JSON válido (sin markdown) con este esquema:
+{
+  "title": "string",
+  "description": "",
+  "difficulty": "media",
+  "total_time_min": number,
+  "servings": number,
+  "calories_per_serving": number,
+  "ingredients": [ { "name": "string", "quantity": "string" } ],
+  "steps": [ { "order": number, "text": "string", "tm_mode": "string" } ],
+  "tags": ["importada-cookidoo"],
+  "nutrition_notes": ""
+}
+
+INGREDIENTES:
+- Combina todas las secciones (p. ej. "Relleno", "Tomate frito", "Pasta", "Bechamel") en UNA sola lista, en el mismo orden en que aparecen. No pierdas ningún ingrediente.
+- "quantity" y "name" exactamente como se ven: "100 g" + "jamón cocido", "2" + "huevos", "1 pellizco" + "sal", "1 cucharadita" + "orégano seco". El nombre NO repite la unidad.
+- Respeta las cantidades al pie de la letra (750 g sigue siendo 750 g). Los detalles entre paréntesis del ingrediente (p. ej. "en lonchas", "cocción 2 minutos") ponlos dentro de "name".
+
+PASOS:
+- Transcribe cada paso numerado de la sección "Preparación" en su orden.
+- El chip Thermomix en negrita ("10 seg/vel 4", "30 min/120°C/vel 1", "6 min/90°C/vel 4") va en "tm_mode" con formato "10 seg / Vel 4", "30 min / 120°C / Vel 1", etc. En "text" deja solo la acción, sin repetir tiempo/temperatura/velocidad.
+- Si un paso no lleva chip Thermomix (p. ej. "Precaliente el horno" u "Hornee 15-20 minutos"), deja "tm_mode": "".
+
+CAMPOS NUMÉRICOS:
+- "servings" y "total_time_min": solo si aparecen en las capturas; si no, usa 4 y 30 respectivamente.
+- "calories_per_serving": solo si la captura lo muestra; si no aparece, omite la clave por completo.
+`.trim();
+
+		const data = await callOpenAIVision({ ...ai, prompt, images });
+		const text = extractTextFromOpenAIResponse(data);
+		if (!text) {
+			throw new Error("OpenAI no devolvió la receta de las capturas");
+		}
+
+		try {
+			const parsed = JSON.parse(extractJsonText(text));
+			return assignIngredientIndicesToRecipe(parsed);
+		} catch (error) {
+			throw new Error(
+				`No pude leer la receta de las capturas: ${error.message}. Texto recibido: ${text.slice(0, 400)}`,
+			);
+		}
+	}
+
 	return {
 		generateThermomixRecipe,
 		generateThermomixProposal,
 		generateRecipeForCookidoo,
 		normalizeRecipeFromRawText,
+		extractRecipeFromImages,
 		parseProposalResponse,
 		summarizeConversation,
 	};

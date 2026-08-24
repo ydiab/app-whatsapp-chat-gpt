@@ -20,7 +20,8 @@ function createApp() {
 	});
 
 	const app = express();
-	app.use(express.json());
+	// Límite alto: /api/chat puede recibir capturas de Cookidoo en base64.
+	app.use(express.json({ limit: "25mb" }));
 
 	// Mobile app web preview (Expo) runs on another origin/port in dev.
 	app.use("/api", (req, res, next) => {

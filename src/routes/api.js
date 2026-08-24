@@ -12,8 +12,32 @@ const {
 	recipeToUploadPayload,
 } = require("../utils/validateRecipe");
 const { runChatTurn } = require("../services/chatTurn");
-const { seedCookidooUrlIfPresent } = require("../services/cookidooImport");
+const {
+	seedCookidooUrlIfPresent,
+	seedCookidooImagesIfPresent,
+} = require("../services/cookidooImport");
 const { looksLikeCookidooUrl } = require("../services/cookidooParse");
+
+/** Tope de capturas por mensaje (una receta rara vez ocupa más pantallas). */
+const MAX_IMAGES = 10;
+
+/**
+ * Valida y limpia `images` del body: solo strings que sean data URLs de imagen
+ * (`data:image/…;base64,…`) o URLs http(s). Descarta el resto y limita el total.
+ */
+function normalizeImages(raw) {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	return raw
+		.map((img) => (typeof img === "string" ? img.trim() : ""))
+		.filter(
+			(img) =>
+				/^data:image\/[a-z0-9.+-]+;base64,/i.test(img) ||
+				/^https?:\/\//i.test(img),
+		)
+		.slice(0, MAX_IMAGES);
+}
 
 /**
  * REST API for the mobile app (app-mimi-mobile). Channel-agnostic twin of the
@@ -46,11 +70,15 @@ function createApiRouter({ config, recipeAi }) {
 	router.post("/chat", async (req, res) => {
 		const userId = String(req.body?.userId || "").trim();
 		const message = String(req.body?.message || "").trim();
+		const images = normalizeImages(req.body?.images);
 
-		if (!userId || !message) {
+		if (!userId) {
+			return res.status(400).json({ error: "userId es obligatorio" });
+		}
+		if (!message && images.length === 0) {
 			return res
 				.status(400)
-				.json({ error: "userId y message son obligatorios" });
+				.json({ error: "Envía un mensaje o al menos una captura" });
 		}
 
 		const wantsStream =
@@ -74,25 +102,45 @@ function createApiRouter({ config, recipeAi }) {
 		}
 
 		try {
-			pushConversationMessage(userId, "user", message);
-
-			if (looksLikeCookidooUrl(message)) {
+			if (images.length > 0) {
 				try {
-					await seedCookidooUrlIfPresent({
+					await seedCookidooImagesIfPresent({
 						userId,
-						userText: message,
-						credentialsPath: config.cookidooCredentialsPath,
-						cookiesPath: config.cookidooCookiesPath,
+						images,
+						extraInstruction: message,
+						recipeAi,
 					});
 				} catch (importError) {
-					console.error("Importar URL Cookidoo (api):", importError);
-					const errorText = `No pude leer esa receta de Cookidoo: ${importError.message}`;
+					console.error("Importar capturas Cookidoo (api):", importError);
+					const errorText = `No pude leer esa receta de las capturas: ${importError.message}`;
 					if (wantsStream) {
 						emit({ type: "error", error: errorText });
 						emit({ type: "done" });
 						return res.end();
 					}
 					return res.status(502).json({ error: errorText });
+				}
+			} else {
+				pushConversationMessage(userId, "user", message);
+
+				if (looksLikeCookidooUrl(message)) {
+					try {
+						await seedCookidooUrlIfPresent({
+							userId,
+							userText: message,
+							credentialsPath: config.cookidooCredentialsPath,
+							cookiesPath: config.cookidooCookiesPath,
+						});
+					} catch (importError) {
+						console.error("Importar URL Cookidoo (api):", importError);
+						const errorText = `No pude leer esa receta de Cookidoo: ${importError.message}`;
+						if (wantsStream) {
+							emit({ type: "error", error: errorText });
+							emit({ type: "done" });
+							return res.end();
+						}
+						return res.status(502).json({ error: errorText });
+					}
 				}
 			}
 

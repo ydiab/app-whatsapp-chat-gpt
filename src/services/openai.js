@@ -1,4 +1,9 @@
-async function callOpenAI({ openAiApiKey, openAiModel, input }) {
+async function callOpenAI({
+	openAiApiKey,
+	openAiModel,
+	input,
+	temperature = 0.7,
+}) {
 	if (!openAiApiKey) {
 		throw new Error("OPENAI_API_KEY no está definido en .env");
 	}
@@ -12,7 +17,7 @@ async function callOpenAI({ openAiApiKey, openAiModel, input }) {
 		body: JSON.stringify({
 			model: openAiModel,
 			input,
-			temperature: 0.7,
+			temperature,
 		}),
 	});
 
@@ -22,6 +27,37 @@ async function callOpenAI({ openAiApiKey, openAiModel, input }) {
 	}
 
 	return response.json();
+}
+
+/**
+ * Igual que callOpenAI pero con imágenes (visión). Cada imagen es un data URL
+ * (`data:image/png;base64,…`) o una URL http(s). Baja la temperatura por defecto
+ * para que la extracción sea fiel a lo que se ve en la captura.
+ */
+async function callOpenAIVision({
+	openAiApiKey,
+	openAiModel,
+	prompt,
+	images,
+	temperature = 0.2,
+}) {
+	const imageParts = (Array.isArray(images) ? images : [])
+		.map((img) => (typeof img === "string" ? img.trim() : ""))
+		.filter(Boolean)
+		.map((image_url) => ({ type: "input_image", image_url }));
+
+	if (imageParts.length === 0) {
+		throw new Error("callOpenAIVision: no se recibió ninguna imagen válida");
+	}
+
+	const input = [
+		{
+			role: "user",
+			content: [{ type: "input_text", text: prompt }, ...imageParts],
+		},
+	];
+
+	return callOpenAI({ openAiApiKey, openAiModel, input, temperature });
 }
 
 function extractTextFromOpenAIResponse(data) {
@@ -48,10 +84,16 @@ function deltaFromStreamEvent(evt) {
 	if (!evt || typeof evt !== "object") {
 		return "";
 	}
-	if (evt.type === "response.output_text.delta" && typeof evt.delta === "string") {
+	if (
+		evt.type === "response.output_text.delta" &&
+		typeof evt.delta === "string"
+	) {
 		return evt.delta;
 	}
-	if (typeof evt.delta === "string" && String(evt.type || "").includes("output_text")) {
+	if (
+		typeof evt.delta === "string" &&
+		String(evt.type || "").includes("output_text")
+	) {
 		return evt.delta;
 	}
 	return "";
@@ -165,6 +207,7 @@ function extractJsonText(rawText) {
 
 module.exports = {
 	callOpenAI,
+	callOpenAIVision,
 	callOpenAIStream,
 	extractTextFromOpenAIResponse,
 	extractJsonText,
