@@ -16,7 +16,7 @@ const GRAMMAR_ES = {
 		horas: 3600,
 	},
 	timeUnitsPattern: "min(?:utos?)?|seg(?:undos?)?|s|h",
-	speedLabel: "Vel\\.?",
+	speedLabel: "Vel(?:ocidad)?\\.?",
 	reverseWord: "giro\\s*inverso|inverso",
 };
 
@@ -38,9 +38,20 @@ function timeToSeconds(value, unit) {
 function parseSpeed(raw) {
 	const text = String(raw || "").trim();
 	let direction = "CW";
-	if (new RegExp(GRAMMAR_ES.reverseWord, "i").test(text)) {
+	if (new RegExp(GRAMMAR_ES.reverseWord, "i").test(text) || /\/\//.test(text)) {
 		direction = "CCW";
 	}
+
+	const onlyDots = text.replace(/\s/g, "");
+	// OCR de Cookidoo: el icono de cuchara es "." y el de giro inverso + cuchara
+	// acaba como ".." detrás de "vel".
+	if (/^\.{2,}$/.test(onlyDots)) {
+		return { speed: "soft", direction: "CCW" };
+	}
+	if (/^\.$/.test(onlyDots)) {
+		return { speed: "soft", direction };
+	}
+
 	if (/cuchara|spoon|\bsoft\b/i.test(text)) {
 		return { speed: "soft", direction };
 	}
@@ -71,17 +82,27 @@ function buildModeRegexes() {
 	const t = GRAMMAR_ES.timeUnitsPattern;
 	const sp = GRAMMAR_ES.speedLabel;
 	const rev = GRAMMAR_ES.reverseWord;
-	const speedToken = `(?:soft|cuchara|spoon|(?:${rev}\\s*)?\\d+(?:[,.]\\d+)?)(?:\\s+${rev})?`;
+	const speedToken = `(?:soft|cuchara|spoon|\\.+|(?:${rev}\\s*)?\\d+(?:[,.]\\d+)?)(?:\\s+${rev})?`;
+	const reverseSlot = "(?:\\s*/\\s*\\.)?";
 	return {
 		full: new RegExp(
-			`(\\d+(?:[-–]\\d+)?)\\s*(${t})\\s*\\/\\s*(?:(\\d+)\\s*°\\s*C|(Varoma))\\s*\\/\\s*${sp}\\s*(${speedToken})`,
+			`(\\d+(?:[-–]\\d+)?)\\s*(${t})\\s*/\\s*(?:(\\d+)\\s*°\\s*C|(Varoma))${reverseSlot}\\s*/\\s*${sp}\\s*(${speedToken})`,
 			"gi",
 		),
 		timeSpeed: new RegExp(
-			`(\\d+(?:[-–]\\d+)?)\\s*(${t})\\s*\\/\\s*${sp}\\s*(${speedToken})`,
+			`(\\d+(?:[-–]\\d+)?)\\s*(${t})\\s*/\\s*${sp}\\s*(${speedToken})`,
 			"gi",
 		),
 	};
+}
+
+function directionFromChip(speedRaw, fullMatch) {
+	const parsed = parseSpeed(speedRaw);
+	const chip = String(fullMatch || "");
+	if (/\/\s*\.\s*\//.test(chip) || /\/\//.test(chip)) {
+		return { speed: parsed.speed, direction: "CCW" };
+	}
+	return parsed;
 }
 
 /**
@@ -100,7 +121,7 @@ function findCookingAnnotationsInText(text) {
 		const timeVal = timeToSeconds(firstTimePart(m[1]), m[2]);
 		if (timeVal == null) continue;
 
-		const { speed, direction } = parseSpeed(m[5]);
+		const { speed, direction } = directionFromChip(m[5], m[0]);
 		const tempStr = m[3];
 		const varoma = m[4];
 
@@ -139,7 +160,7 @@ function findCookingAnnotationsInText(text) {
 
 		const timeVal = timeToSeconds(firstTimePart(m[1]), m[2]);
 		if (timeVal == null) continue;
-		const { speed, direction } = parseSpeed(m[3]);
+		const { speed, direction } = directionFromChip(m[3], m[0]);
 
 		out.push({
 			type: "TTS",
@@ -234,22 +255,24 @@ function normalizeTmModeChip(raw) {
 	const s = String(raw || "").trim();
 	if (!s) return null;
 
-	if (/\d+\s*min\s*\/\s*\d+\s*°\s*C\s*\/\s*Vel/i.test(s)) {
-		return s.replace(/\s*\/\s*giro\s*inverso/i, " giro inverso");
-	}
-
 	const min = s.match(/(\d+(?:[.,]\d+)?)\s*min(?:utos?)?/i);
 	const sec = s.match(/(\d+)\s*seg(?:undos?)?/i);
 	const temp = /Varoma/i.test(s) ? "Varoma" : s.match(/(\d+)\s*°?\s*C/i)?.[1];
-	const reverse = /giro\s*inverso|inverso|antihorario/i.test(s);
+	const reverse =
+		/giro\s*inverso|inverso|antihorario/i.test(s) ||
+		/\/\s*\.\s*\//.test(s) ||
+		/\/{2}/.test(s) ||
+		/vel(?:ocidad)?\s*\.{2,}/i.test(s);
+	const spoon =
+		/cuchara|spoon|\bsoft\b/i.test(s) || /vel(?:ocidad)?\s*\.+/i.test(s);
 
 	let speed = "1";
-	if (/cuchara|spoon/i.test(s)) {
+	if (spoon) {
 		speed = "soft";
 	} else {
-		const vel = s.match(/vel(?:ocidad)?\.?\s*([\d.,]+|soft|cuchara)/i);
-		if (vel) {
-			speed = /cuchara/i.test(vel[1]) ? "soft" : vel[1].replace(",", ".");
+		const vel = s.match(/vel(?:ocidad)?\.?\s*([\d.,]+)/i);
+		if (vel && !/^\.+$/.test(vel[1])) {
+			speed = vel[1].replace(",", ".");
 		}
 	}
 
@@ -289,12 +312,11 @@ function resolveTmModeChip(step) {
 /**
  * Convierte una anotación TTS/MODE (devuelta por findCookingAnnotationsInText)
  * en un chip con el formato nativo que usa Cookidoo en sus recetas oficiales:
- *   "4 seg/vel 4"            (sin temperatura, CW)
- *   "8 min/120°C/vel 4"      (con temperatura, CW)
- *   "8 min/120°C//vel ."     (con temperatura, giro inverso, velocidad cuchara)
- *   "15 min/Varoma/vel 1"    (steaming)
- * El doble slash (`//`) antes de `vel` marca el giro inverso y `.` se renderiza
- * como icono de cuchara en la app.
+ *   "4 seg/velocidad 4"
+ *   "8 min/120°C/velocidad 4"
+ *   "8 min/120°C/./velocidad ."   (giro inverso = "." entre barras; cuchara = "." tras velocidad)
+ *   "15 min/Varoma/velocidad 1"
+ * Cookidoo sustituye esos "." por los iconos. No uses "//" (se ve como texto).
  * @param {object|null} annotation
  * @returns {string|null}
  */
@@ -320,15 +342,15 @@ function buildCookidooNativeChip(annotation) {
 		middlePart = `/${data.temperature.value}°C`;
 	}
 
-	const separator = data.direction === "CCW" ? "//" : "/";
+	const reverseSlot = data.direction === "CCW" ? "/." : "";
 	const speedStr = data.speed === "soft" ? "." : String(data.speed || "1");
 
-	return `${timeStr}${middlePart}${separator}vel ${speedStr}`;
+	return `${timeStr}${middlePart}${reverseSlot}/velocidad ${speedStr}`;
 }
 
 /**
  * Convierte un chip user-friendly ("7 min / 100°C / Vel soft giro inverso")
- * directamente al formato nativo Cookidoo ("7 min/100°C//vel .").
+ * directamente al formato nativo Cookidoo ("7 min/100°C/./velocidad .").
  * @param {string|null} userChip
  * @returns {string|null}
  */

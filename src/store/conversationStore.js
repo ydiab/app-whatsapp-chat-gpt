@@ -55,6 +55,16 @@ function getConversationContext(from) {
 	};
 }
 
+/** Nueva importación: no mezclar con recetas anteriores del mismo userId. */
+function resetConversation(from) {
+	conversationStore.set(from, {
+		messages: [],
+		summary: null,
+		recipeReady: false,
+		currentRecipeText: null,
+	});
+}
+
 module.exports = {
 	conversationStore,
 	getConversation,
@@ -63,4 +73,5 @@ module.exports = {
 	setCurrentRecipeText,
 	setConversationSummary,
 	getConversationContext,
+	resetConversation,
 };

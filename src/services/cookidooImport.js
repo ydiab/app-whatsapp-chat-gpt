@@ -7,9 +7,11 @@ const { fetchCookidooRecipe } = require("./cookidooFetch");
 const {
 	pushConversationMessage,
 	setCurrentRecipeText,
+	resetConversation,
 } = require("../store/conversationStore");
+const { inferServingsChange, scaleRecipe } = require("../utils/scaleRecipe");
 
-function formatImportedRecipeForAi(recipe) {
+function formatImportedRecipeForAi(recipe, { scaledFrom } = {}) {
 	const ingLines = (recipe.ingredients || [])
 		.map((item) =>
 			[item.quantity, item.name].filter(Boolean).join(" de ").trim(),
@@ -30,22 +32,37 @@ function formatImportedRecipeForAi(recipe) {
 		? `~${recipe.calories_per_serving} kcal/ración`
 		: recipe.nutrition_notes || "";
 
+	const servingsLine = scaledFrom
+		? `Raciones: ${recipe.servings} (ya escalada desde ${scaledFrom}; NO vuelvas a multiplicar)`
+		: `Raciones originales: ${recipe.servings || "?"}`;
+
+	const respectLines = scaledFrom
+		? [
+				"IMPORTANTE: estas cantidades Y los tiempos YA están adaptados a las raciones pedidas.",
+				"Cópialos EXACTAMENTE. NO multipliques otra vez ni dejes los valores originales de las capturas.",
+				"Cocción/sofrito un poco más largos; picar/mezclar y horno suben menos (no al doble). Velocidades, temperaturas y el precalentamiento del horno no se tocan.",
+				"Solo conviértela a formato Thermomix (pasos con tiempo/temperatura/velocidad).",
+			]
+		: [
+				"IMPORTANTE: respeta EXACTAMENTE estos ingredientes, cantidades y pasos.",
+				"NO la mejores ni cambies proporciones por iniciativa propia.",
+				"Solo conviértela a formato Thermomix y aplica ÚNICAMENTE la adaptación que pida la usuaria (raciones, calorías, sin gluten, etc.).",
+				"Si la adaptación cambia las raciones o calorías, ajusta también los tiempos al nuevo volumen: cocción/sofrito un poco más (no el doble); picar/mezclar y horno aún menos; velocidades, temperaturas y precalentamiento iguales.",
+			];
+
 	return [
 		`Receta original de Cookidoo (BASE FIJA): ${recipe.title}`,
-		`Raciones originales: ${recipe.servings || "?"}`,
+		servingsLine,
 		`Tiempo: ~${recipe.total_time_min || "?"} min`,
 		calories ? `Nutrición original: ${calories}` : "",
 		"",
-		"Ingredientes originales:",
+		"Ingredientes:",
 		ingLines || "(sin ingredientes)",
 		"",
-		"Pasos originales:",
+		"Pasos:",
 		stepLines || "(sin pasos)",
 		"",
-		"IMPORTANTE: respeta EXACTAMENTE estos ingredientes, cantidades y pasos.",
-		"NO la mejores ni cambies proporciones por iniciativa propia.",
-		"Solo conviértela a formato Thermomix y aplica ÚNICAMENTE la adaptación que pida la usuaria (raciones, calorías, sin gluten, etc.).",
-		"Si la adaptación cambia las raciones o calorías, ajusta también los tiempos de cocción/sofrito/calentado al nuevo volumen (mantén velocidades y temperaturas; el horno convencional no cambia).",
+		...respectLines,
 		"En los pasos, menciona cada ingrediente con el MISMO nombre que en la lista (p. ej. jamón cocido, no jamón de York).",
 		"No escribas ingredient_indices, corchetes de índice ni JSON en el texto que lee la usuaria.",
 	]
@@ -59,22 +76,49 @@ function publicImportedRecipe(recipe) {
 }
 
 /**
- * Deja la receta importada como BASE FIJA en el historial y añade la instrucción
- * de adaptación (o "tal cual" si no hay ninguna). Compartido por la importación
- * desde URL y desde capturas de pantalla.
+ * Deja la receta importada como BASE FIJA. Si pide otras raciones, escala las
+ * cantidades EN CÓDIGO: el modelo copiaba el original y no multiplicaba.
  */
 function seedImportedRecipe(userId, recipe, extraInstruction) {
-	const originalBlock = formatImportedRecipeForAi(recipe);
+	resetConversation(userId);
+
+	const instruction = String(extraInstruction || "").trim();
+	const change = inferServingsChange(instruction, recipe.servings);
+	let toSeed = recipe;
+	let scaledFrom = null;
+
+	if (change) {
+		toSeed = scaleRecipe(recipe, change.original, change.target);
+		scaledFrom = change.original;
+		console.log(
+			`Escalado en código: ${change.original} → ${change.target} raciones (factor ${change.target}/${change.original})`,
+		);
+		const sample = (toSeed.ingredients || [])
+			.slice(0, 3)
+			.map((item) => `${item.quantity} ${item.name}`)
+			.join("; ");
+		if (sample) {
+			console.log(`Ingredientes tras escalar: ${sample}`);
+		}
+		const timeSample = (toSeed.steps || [])
+			.filter((step) => step.tm_mode)
+			.slice(0, 4)
+			.map((step) => step.tm_mode)
+			.join(" · ");
+		if (timeSample) {
+			console.log(`Tiempos tras escalar: ${timeSample}`);
+		}
+	}
+
+	const originalBlock = formatImportedRecipeForAi(toSeed, { scaledFrom });
 	pushConversationMessage(userId, "user", originalBlock);
 	setCurrentRecipeText(userId, originalBlock);
 
-	const instruction = String(extraInstruction || "").trim();
 	if (instruction) {
-		pushConversationMessage(
-			userId,
-			"user",
-			`Adaptación que quiero: ${instruction}`,
-		);
+		const followUp = scaledFrom
+			? `Adaptación extra (además del cambio a ${toSeed.servings} raciones, ya aplicado en cantidades y tiempos de cocción): ${instruction}`
+			: `Adaptación que quiero: ${instruction}`;
+		pushConversationMessage(userId, "user", followUp);
 	} else {
 		pushConversationMessage(
 			userId,
@@ -160,6 +204,10 @@ async function seedCookidooImagesIfPresent({
 			"No pude leer los ingredientes de esas capturas. Prueba con imágenes más nítidas o que incluyan la lista completa.",
 		);
 	}
+
+	console.log(
+		`Capturas Cookidoo → "${recipe.title}" · ${recipe.servings ?? "?"} raciones · ${recipe.ingredients.length} ingredientes`,
+	);
 
 	seedImportedRecipe(userId, recipe, extraInstruction);
 

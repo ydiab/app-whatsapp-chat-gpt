@@ -12,6 +12,7 @@ const {
 } = require("./openai");
 const { formatMessagesForPrompt } = require("./conversationContext");
 const { assignIngredientIndicesToRecipe } = require("./cookidooParse");
+const { normalizeTmModeChip } = require("../utils/thermomixCookidoo");
 
 function createRecipeGenerationService({ openAiApiKey, openAiModel }) {
 	const ai = { openAiApiKey, openAiModel };
@@ -166,13 +167,15 @@ PASOS Y COOKIDOO:
    - "Añadir el aceite y la pechuga de pollo en dados y sofreír."
    - "Incorporar la cebolla, el pimiento rojo y el ajo. Trocear."
    - "Programar sin medidor."
-  NO pegues la lista de ingredientes al inicio del paso. NO repitas tiempos ni temperatura en text (van en tm_mode). Si el paso solo cocina/programa/reposa, no menciones ingredientes.
+	NO pegues la lista de ingredientes al inicio del paso. NO repitas tiempos ni temperatura en text (van en tm_mode). Si el paso solo cocina/programa/reposa, no menciones ingredientes.
+	NO escribas en text "giro inverso", "con giro inverso activado" ni "velocidad cuchara": eso va SOLO en tm_mode.
 - "tm_mode" OBLIGATORIO en todo paso que cocine/mezcle en el vaso. Formato EXACTO con barras:
   "7 min / 100°C / Vel 1 giro inverso"
   "7 min / 100°C / Vel soft giro inverso"
   "3 min / Varoma / Vel 2"
   "20 seg / Vel 8"
   Velocidades: número 0.5-10, o "soft" para cuchara. Giro inverso pegado a la velocidad: "Vel 1 giro inverso".
+  NUNCA uses puntos (".", "..") para cuchara o giro inverso: en Cookidoo son iconos; en JSON se escriben "soft" y "giro inverso".
 
   Calidad Thermomix (TM7 salvo que diga otro modelo):
 - Pocos pasos; no obligar a estar echando ingredientes cada dos minutos.
@@ -183,9 +186,9 @@ PASOS Y COOKIDOO:
 - Siempre intenta que las verduras se corten en la Thermomix, no que tenga que cortarlas antes de echarlas. El mínimo esfuerzo queremos.
 - Que las verduras queden bien hechas pero sin pasarnos.
 
-RECETA IMPORTADA (respeta el original): si el historial trae una receta que la usuaria quiere subir (p. ej. de Cookidoo), respeta EXACTAMENTE sus ingredientes y cantidades. NO apliques las reglas de calidad de arriba para cambiarla ni la "mejores": solo conviértela a formato Thermomix y aplica únicamente los cambios que la usuaria haya pedido de forma explícita.
+RECETA IMPORTADA (respeta el original): si el historial trae una receta que la usuaria quiere subir (p. ej. de Cookidoo), respeta EXACTAMENTE sus ingredientes y cantidades. NO apliques las reglas de calidad de arriba para cambiarla ni la "mejores": solo conviértela a formato Thermomix y aplica únicamente los cambios que la usuaria haya pedido de forma explícita. Si el texto indica que las cantidades YA están escaladas a las raciones pedidas, NO las vuelvas a multiplicar.
 
-ESCALADO DE RACIONES/CALORÍAS: si la usuaria pide cambiar raciones o calorías, no basta con dividir ingredientes; ajusta también los TIEMPOS de cocción, sofrito y calentado en "tm_mode" al nuevo volumen (menos cantidad = algo menos de tiempo; más cantidad = algo más). MANTÉN velocidades y temperaturas iguales (picar/mezclar no depende de la cantidad). Los tiempos de horno convencional no cambian.
+ESCALADO DE RACIONES/CALORÍAS: si la usuaria pide cambiar raciones o calorías, no basta con dividir ingredientes; ajusta también los TIEMPOS al nuevo volumen (menos cantidad = algo menos; más = algo más, NUNCA el doble de tiempo). Cocción/sofrito/vapor un poco más; picar/mezclar y horno aún menos. MANTÉN velocidades, temperaturas y el precalentamiento del horno.
 
 Historial / petición:
 ${userPrompt}
@@ -209,7 +212,9 @@ ${userPrompt}
 					text: String(step.text || "")
 						.replace(/\s*\|\s*ingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
 						.replace(/\bingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+						.replace(/\s*\/?vel(?:ocidad)?\s*\.{2,}/gi, "")
 						.trim(),
+					tm_mode: normalizeTmModeChip(step.tm_mode) || step.tm_mode,
 				}));
 			}
 			return assignIngredientIndicesToRecipe(parsed);
@@ -259,7 +264,8 @@ RECETAS IMPORTADAS / QUE LA USUARIA QUIERE SUBIR (MUY IMPORTANTE):
 - Tu trabajo es solo convertirla a formato Thermomix (pasos con tiempo/temperatura/velocidad), manteniéndola idéntica.
 - Aplica ÚNICAMENTE los cambios que la usuaria pida de forma explícita (p. ej. "menos calorías", "para 2 raciones", "sin gluten"). Si no pide ningún cambio, devuélvela tal cual.
 - No añadas ni quites ingredientes, ni reajustes cantidades, ni "redondees" nada salvo que te lo pidan.
-- Si el cambio pedido es de raciones o calorías, escala las cantidades Y ajusta los tiempos de cocción/sofrito/calentado al nuevo volumen (velocidades y temperaturas se mantienen; el horno convencional no cambia). Menciona en tu mensaje inicial, en una frase, que has ajustado los tiempos al nuevo volumen.
+- Si el cambio pedido es de raciones o calorías, escala las cantidades Y ajusta los tiempos al nuevo volumen: cocción/sofrito un poco más (no el doble); picar/mezclar y horno aún menos; velocidades, temperaturas y precalentamiento iguales. Menciona en tu mensaje inicial, en una frase, que has ajustado los tiempos al nuevo volumen.
+- EXCEPCIÓN: si la receta de BASE FIJA dice que YA está escalada (p. ej. "ya escalada desde 2"), copia esas cantidades tal cual. No las multipliques otra vez.
 
 Fases de la conversación:
 1) Saludo vacío sin pista de receta → preséntate brevemente y pregunta "¿qué cocinamos hoy?"
@@ -386,11 +392,17 @@ INGREDIENTES:
 
 PASOS:
 - Transcribe cada paso numerado de la sección "Preparación" en su orden.
-- El chip Thermomix en negrita ("10 seg/vel 4", "30 min/120°C/vel 1", "6 min/90°C/vel 4") va en "tm_mode" con formato "10 seg / Vel 4", "30 min / 120°C / Vel 1", etc. En "text" deja solo la acción, sin repetir tiempo/temperatura/velocidad.
+- El chip Thermomix en negrita va en "tm_mode". En Cookidoo, giro inverso y velocidad cuchara son ICONOS, no puntos:
+  - icono circular de flecha = giro inverso. NUNCA lo transcribas como "." ni "..".
+  - icono de cuchara = velocidad cuchara (soft). NUNCA lo transcribas como "." ni "..".
+  - "7 min/120°C/" + icono inverso + "/velocidad" + icono cuchara → tm_mode "7 min / 120°C / Vel soft giro inverso"
+  - "4 seg/vel 4" → "4 seg / Vel 4"; "30 min/120°C/vel 1" → "30 min / 120°C / Vel 1"
+  En "text" deja solo la acción, sin repetir tiempo/temperatura/velocidad.
 - Si un paso no lleva chip Thermomix (p. ej. "Precaliente el horno" u "Hornee 15-20 minutos"), deja "tm_mode": "".
 
 CAMPOS NUMÉRICOS:
-- "servings" y "total_time_min": solo si aparecen en las capturas; si no, usa 4 y 30 respectivamente.
+- "servings": lee con atención el nº de RACIONES/PORCIONES/COMENSALES (suele ir en la cabecera junto al tiempo, p. ej. "20 min · Total 30 min · 2 raciones"). Es un dato clave: NO lo inventes. Si no aparece en ninguna captura, omite la clave o pon null. NUNCA asumas 4.
+- "total_time_min": el tiempo total en minutos si aparece; si no, 30.
 - "calories_per_serving": solo si la captura lo muestra; si no aparece, omite la clave por completo.
 `.trim();
 
@@ -402,6 +414,12 @@ CAMPOS NUMÉRICOS:
 
 		try {
 			const parsed = JSON.parse(extractJsonText(text));
+			if (Array.isArray(parsed?.steps)) {
+				parsed.steps = parsed.steps.map((step) => ({
+					...step,
+					tm_mode: normalizeTmModeChip(step.tm_mode) || step.tm_mode,
+				}));
+			}
 			return assignIngredientIndicesToRecipe(parsed);
 		} catch (error) {
 			throw new Error(

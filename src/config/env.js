@@ -9,7 +9,7 @@ function getConfig() {
 		whatsappToken: process.env.WHATSAPP_TOKEN,
 		phoneNumberId: process.env.PHONE_NUMBER_ID,
 		openAiApiKey: process.env.OPENAI_API_KEY,
-		openAiModel: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+		openAiModel: process.env.OPENAI_MODEL || "gpt-5.6-sol",
 		publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
 		/** Optional HTTPS URL of your own service that logs into Cookidoo and creates the recipe. */
 		cookidooBridgeUrl: process.env.COOKIDOO_BRIDGE_URL || "",

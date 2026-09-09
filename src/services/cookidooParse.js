@@ -85,7 +85,9 @@ function parseYieldToServings(yieldValue) {
 
 function parseExportIngredient(item) {
 	const name = String(item.name || "").trim();
-	const unit = String(item.unit || "g").trim().toLowerCase();
+	const unit = String(item.unit || "g")
+		.trim()
+		.toLowerCase();
 	const q = item.quantity;
 
 	if (!name) {
@@ -110,8 +112,9 @@ function splitInstructionAndTm(instruction) {
 	}
 
 	const patterns = [
+		/\d+\s*min(?:utos?)?\s*\/+\s*\d+\s*°\s*C\s*\/+\s*vel(?:ocidad)?\.?\s*(?:cuchara|soft|\.+|giro\s*inverso|[\d.,]+)/gi,
 		/\d+\s*min(?:utos?)?\s*\/\s*\d+\s*°\s*C(?:\s*\/\s*)?(?:giro\s*inverso(?:\s*\/\s*)?)?(?:vel(?:ocidad)?\.?\s*)?(?:cuchara|soft|[\d.,]+)/gi,
-		/\d+\s*seg(?:undos?)?\s*\/\s*vel(?:ocidad)?\.?\s*[\d.,]+/gi,
+		/\d+\s*seg(?:undos?)?\s*\/+\s*vel(?:ocidad)?\.?\s*(?:cuchara|soft|\.+|[\d.,]+)/gi,
 		/\d+\s*s\s*\/\s*vel(?:ocidad)?\.?\s*[\d.,]+/gi,
 	];
 
@@ -127,8 +130,7 @@ function splitInstructionAndTm(instruction) {
 		return { text: full, tm_mode: "" };
 	}
 
-	const tm_mode =
-		normalizeTmModeChip(chipRaw.replace(/\//g, " / ")) || chipRaw;
+	const tm_mode = normalizeTmModeChip(chipRaw.replace(/\//g, " / ")) || chipRaw;
 	let text = full.replace(chipRaw, "").trim();
 	text = text.replace(/\s{2,}/g, " ").replace(/\s+\./g, ".");
 	text = text.replace(/\s*\.\s*Retire y reserve\.?\s*$/i, "").trim();
@@ -238,8 +240,7 @@ function assignIngredientIndicesToRecipe(recipe) {
 			}
 		}
 		const previous = lastStepByName.has(key) ? lastStepByName.get(key) : -1;
-		const chosen =
-			matches.find((j) => j > previous) ?? matches[0] ?? null;
+		const chosen = matches.find((j) => j > previous) ?? matches[0] ?? null;
 		if (chosen == null) {
 			continue;
 		}
@@ -431,7 +432,10 @@ function parseCookidooApiStep(step, ingredients) {
 	if (cookAnns.length > 0) {
 		bodyEnd = cookAnns[0].position?.offset ?? bodyEnd;
 	}
-	let stepText = text.slice(bodyStart, bodyEnd).replace(/^\n+|\n+$/g, "").trim();
+	let stepText = text
+		.slice(bodyStart, bodyEnd)
+		.replace(/^\n+|\n+$/g, "")
+		.trim();
 	if (!stepText && text && !tm_mode) {
 		stepText = text.trim();
 	}
@@ -450,8 +454,7 @@ function parseMimiExportContent(meta, content) {
 
 	const rawSteps = content.steps || content.instructions || [];
 	const steps = rawSteps.map((step, index) => {
-		const instruction =
-			step.instruction ?? step.text ?? step.description ?? "";
+		const instruction = step.instruction ?? step.text ?? step.description ?? "";
 		const { text, tm_mode } = splitInstructionAndTm(instruction);
 		const stepText = text || String(step.name || "").trim() || instruction;
 		let indices = inferIngredientIndicesForStep(
@@ -487,7 +490,8 @@ function parseMimiExportContent(meta, content) {
 
 	const servings = parseYieldToServings(content.yield ?? meta.yield);
 	const nutrition = content.nutrition;
-	const calories_per_serving = Number(nutrition?.caloriesPerServing) || undefined;
+	const calories_per_serving =
+		Number(nutrition?.caloriesPerServing) || undefined;
 	const nutrition_notes = nutrition
 		? `~${nutrition.caloriesPerServing ?? "?"} kcal/porción · P ${nutrition.protein ?? "?"} · G ${nutrition.fat ?? "?"} · HC ${nutrition.carbohydrates ?? "?"}`
 		: "";
@@ -592,8 +596,7 @@ function looksLikeRecipeJson(text) {
 
 // Detecta URLs de Cookidoo (cookidoo.es, cookidoo.co.uk, cookidoo.com, etc.)
 // Las URLs tienen el recipe ID al final: …/r000012345  o  …/r000012345?…
-const COOKIDOO_URL_RE =
-	/https?:\/\/cookidoo\.[a-z.]+\/[^\s]*?\/(r\d{4,})\b/i;
+const COOKIDOO_URL_RE = /https?:\/\/cookidoo\.[a-z.]+\/[^\s]*?\/(r\d{4,})\b/i;
 
 /**
  * @param {string} text
@@ -604,7 +607,9 @@ function looksLikeCookidooUrl(text) {
 }
 
 function extractCookidooUrl(text) {
-	const m = String(text || "").match(/https?:\/\/cookidoo\.[a-z.]+\/[^\s<>"']+/i);
+	const m = String(text || "").match(
+		/https?:\/\/cookidoo\.[a-z.]+\/[^\s<>"']+/i,
+	);
 	if (!m) {
 		return null;
 	}

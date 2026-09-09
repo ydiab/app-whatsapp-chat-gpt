@@ -15,6 +15,7 @@ const {
 	findCookingAnnotationsInText,
 	buildCookidooNativeChip,
 	findIngredientLocationInText,
+	normalizeTmModeChip,
 } = require("../utils/thermomixCookidoo");
 const { validateRecipeForUpload } = require("../utils/validateRecipe");
 const {
@@ -112,7 +113,8 @@ function modelIndicesLookBogus(sortedSteps, n) {
 		return false;
 	}
 	const withIndices = sortedSteps.filter(
-		(s) => Array.isArray(s.ingredient_indices) && s.ingredient_indices.length > 0,
+		(s) =>
+			Array.isArray(s.ingredient_indices) && s.ingredient_indices.length > 0,
 	);
 	if (withIndices.length < Math.ceil(sortedSteps.length * 0.6)) {
 		return false;
@@ -128,21 +130,28 @@ function stripInternalStepNoise(text) {
 	return String(text || "")
 		.replace(/\s*\|\s*ingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
 		.replace(/\bingredient_indices\s*:\s*\[[^\]]*\]/gi, "")
+		.replace(/\s*(?:,|y)?\s*con\s+giro\s+inverso(?:\s+activado)?\.?/gi, "")
+		.replace(/\s*(?:,|y)?\s*giro\s+inverso(?:\s+activado)?\.?/gi, "")
+		.replace(/\s*(?:,|y)?\s*(?:a\s+)?velocidad\s+cuchara\.?/gi, "")
+		.replace(/\s{2,}/g, " ")
+		.replace(/\s+\./g, ".")
 		.trim();
 }
 
 function inferIngredientIndicesPerStep(recipe) {
 	const assigned = assignIngredientIndicesToRecipe(recipe);
-	return [...(assigned.steps || [])].sort(
-		(a, b) => (a.order || 0) - (b.order || 0),
-	).map((step, j) => ({
-		order: step.order ?? j + 1,
-		text: stripInternalStepNoise(step.text),
-		tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
-		ingredient_indices: Array.isArray(step.ingredient_indices)
-			? step.ingredient_indices
-			: [],
-	}));
+	return [...(assigned.steps || [])]
+		.sort((a, b) => (a.order || 0) - (b.order || 0))
+		.map((step, j) => ({
+			order: step.order ?? j + 1,
+			text: stripInternalStepNoise(step.text),
+			tm_mode:
+				normalizeTmModeChip(step.tm_mode) ||
+				(step.tm_mode != null ? String(step.tm_mode).trim() : ""),
+			ingredient_indices: Array.isArray(step.ingredient_indices)
+				? step.ingredient_indices
+				: [],
+		}));
 }
 
 /**
@@ -163,7 +172,8 @@ function resolveIngredientIndicesPerStep(recipe) {
 		modelIndicesLookBogus(sortedSteps, n) ||
 		sortedSteps.every(
 			(s) =>
-				!Array.isArray(s.ingredient_indices) || s.ingredient_indices.length === 0,
+				!Array.isArray(s.ingredient_indices) ||
+				s.ingredient_indices.length === 0,
 		) ||
 		assignedCount < Math.ceil(n * 0.4);
 
@@ -172,9 +182,10 @@ function resolveIngredientIndicesPerStep(recipe) {
 		: sortedSteps.map((step, j) => ({
 				order: step.order ?? j + 1,
 				text: stripInternalStepNoise(step.text),
-				tm_mode: step.tm_mode != null ? String(step.tm_mode).trim() : "",
-				ingredient_indices:
-					parseIndices(step.ingredient_indices, n) ?? [],
+				tm_mode:
+					normalizeTmModeChip(step.tm_mode) ||
+					(step.tm_mode != null ? String(step.tm_mode).trim() : ""),
+				ingredient_indices: parseIndices(step.ingredient_indices, n) ?? [],
 			}));
 
 	steps = steps.map((step) => {
@@ -365,6 +376,18 @@ function isValidMachineProgram(template) {
 	return !temp || temp <= 120;
 }
 
+function spliceChip(text, at, nativeChip) {
+	let rest = text.slice(at);
+	if (nativeChip.endsWith(".") && /^\s*\./.test(rest)) {
+		rest = rest.replace(/^\s*\./, "");
+	}
+	const sep = at > 0 && text[at - 1] !== " " ? " " : "";
+	return {
+		text: `${text.slice(0, at)}${sep}${nativeChip}${rest}`,
+		chipOffset: at + sep.length,
+	};
+}
+
 function placeChipAfterCookVerb(body, nativeChip) {
 	const text = removeCookingChipsFromText(body);
 	if (!nativeChip) {
@@ -395,14 +418,12 @@ function placeChipAfterCookVerb(body, nativeChip) {
 
 	if (best) {
 		const afterVerb = best.sentenceStart + best.verb.index + best.verb.length;
-		const out = `${text.slice(0, afterVerb)} ${nativeChip}${text.slice(afterVerb)}`;
-		return { text: out, chipOffset: afterVerb + 1 };
+		return spliceChip(text, afterVerb, nativeChip);
 	}
 
 	const firstDot = text.indexOf(".");
 	if (firstDot > 0) {
-		const out = `${text.slice(0, firstDot)} ${nativeChip}${text.slice(firstDot)}`;
-		return { text: out, chipOffset: firstDot + 1 };
+		return spliceChip(text, firstDot, nativeChip);
 	}
 
 	const sep = text ? " " : "";
@@ -520,7 +541,11 @@ function cleanCookidooIngredients(ingredients) {
  * @param {string} credentialsPath
  * @param {string} [cookiesPath]
  */
-async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPath) {
+async function uploadCookidooNativeToAccount(
+	native,
+	credentialsPath,
+	cookiesPath,
+) {
 	const content = native?.content;
 	if (!content) {
 		throw new Error("Falta recipeContent en el JSON de Cookidoo");
@@ -545,7 +570,8 @@ async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPat
 	const title = String(content.name || native?.meta?.name || "Receta").trim();
 	const servings = Number(content.yield?.value) || 4;
 	const totalSeconds = Number(content.totalTime) || 1800;
-	const activeSeconds = Number(content.prepTime) || Math.floor(totalSeconds * 0.35);
+	const activeSeconds =
+		Number(content.prepTime) || Math.floor(totalSeconds * 0.35);
 	const cookSeconds = Number(content.cookTime) || totalSeconds - activeSeconds;
 	const hints =
 		typeof content.hints === "string"
@@ -650,7 +676,11 @@ async function uploadCookidooNativeToAccount(native, credentialsPath, cookiesPat
 /**
  * @returns {{ cookidooRecipeId: string, recipeUrl: string }}
  */
-async function uploadRecipeToCookidooAccount(recipe, credentialsPath, cookiesPath) {
+async function uploadRecipeToCookidooAccount(
+	recipe,
+	credentialsPath,
+	cookiesPath,
+) {
 	validateRecipeForUpload(recipe);
 
 	const creds = await loadCookidooCredentials(credentialsPath);
