@@ -41,7 +41,7 @@ async function prepareStructuredRecipe(userId, recipeAi, conversation) {
  * estructura la receta para Cookidoo cuando está completa.
  *
  * `onEvent` (app): `{ type: 'reply'|'recipeText'|'recipeCard', text?, recipeId? }`
- * se llama en cuanto hay un trozo listo, sin esperar al resto.
+ * El intro se emite en cuanto está listo; receta y tarjeta a la vez.
  */
 async function runChatTurn(userId, recipeAi, { channel = "whatsapp", onEvent } = {}) {
 	const conversation = getConversation(userId);
@@ -84,7 +84,9 @@ async function runChatTurn(userId, recipeAi, { channel = "whatsapp", onEvent } =
 
 	if (recipeText) {
 		pushConversationMessage(userId, "assistant", recipeText);
-		onEvent?.({ type: "recipeText", text: recipeText });
+		if (!isComplete) {
+			onEvent?.({ type: "recipeText", text: recipeText });
+		}
 	} else if (!introFlushed && !intro) {
 		pushConversationMessage(userId, "assistant", proposal);
 		onEvent?.({ type: "reply", text: proposal });
@@ -104,6 +106,9 @@ async function runChatTurn(userId, recipeAi, { channel = "whatsapp", onEvent } =
 			recipeAi,
 			conversation,
 		));
+		if (recipeText) {
+			onEvent?.({ type: "recipeText", text: recipeText });
+		}
 		if (recipeId) {
 			onEvent?.({ type: "recipeCard", recipeId });
 		}
