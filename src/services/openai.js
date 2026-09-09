@@ -103,7 +103,13 @@ function deltaFromStreamEvent(evt) {
  * Same as callOpenAI but streams tokens. `onText(fullSoFar)` fires as text grows.
  * Falls back to a non-streaming request if the body isn't readable.
  */
-async function callOpenAIStream({ openAiApiKey, openAiModel, input, onText }) {
+async function callOpenAIStream({
+	openAiApiKey,
+	openAiModel,
+	input,
+	onText,
+	temperature = 0.7,
+}) {
 	if (!openAiApiKey) {
 		throw new Error("OPENAI_API_KEY no está definido en .env");
 	}
@@ -117,7 +123,7 @@ async function callOpenAIStream({ openAiApiKey, openAiModel, input, onText }) {
 		body: JSON.stringify({
 			model: openAiModel,
 			input,
-			temperature: 0.7,
+			temperature,
 			stream: true,
 		}),
 	});

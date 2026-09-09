@@ -9,9 +9,36 @@ const {
 	setCurrentRecipeText,
 	resetConversation,
 } = require("../store/conversationStore");
-const { inferServingsChange, scaleRecipe } = require("../utils/scaleRecipe");
+const { TASK_MODES } = require("../prompts/mimi");
 
-function formatImportedRecipeForAi(recipe, { scaledFrom } = {}) {
+const TM_HINT =
+	/thermomix|cookidoo|varoma|giro inverso|vel(?:ocidad)?\s*(?:soft|\d)|vaso (?:de la )?(?:thermomix|máquina)/i;
+
+function recipeLooksLikeThermomix(recipe) {
+	if (recipe?.is_thermomix === true) {
+		return true;
+	}
+	if (recipe?.is_thermomix === false) {
+		return false;
+	}
+
+	const steps = Array.isArray(recipe?.steps) ? recipe.steps : [];
+	if (steps.some((step) => String(step?.tm_mode || "").trim())) {
+		return true;
+	}
+
+	const blob = [
+		recipe?.title,
+		...(recipe?.tags || []),
+		...steps.map((step) => step?.text),
+	]
+		.filter(Boolean)
+		.join(" ");
+	return TM_HINT.test(blob);
+}
+
+function formatImportedRecipeForAi(recipe, { mode } = {}) {
+	const isAdapt = mode === TASK_MODES.adaptar;
 	const ingLines = (recipe.ingredients || [])
 		.map((item) =>
 			[item.quantity, item.name].filter(Boolean).join(" de ").trim(),
@@ -32,27 +59,26 @@ function formatImportedRecipeForAi(recipe, { scaledFrom } = {}) {
 		? `~${recipe.calories_per_serving} kcal/ración`
 		: recipe.nutrition_notes || "";
 
-	const servingsLine = scaledFrom
-		? `Raciones: ${recipe.servings} (ya escalada desde ${scaledFrom}; NO vuelvas a multiplicar)`
-		: `Raciones originales: ${recipe.servings || "?"}`;
+	const header = isAdapt
+		? `MODO: ADAPTAR\nReceta Thermomix de partida (NO la reinventes): ${recipe.title}`
+		: `MODO: TRADUCIR\nReceta de partida (no Thermomix; tradúcela al vaso sin cambiar el plato): ${recipe.title}`;
 
-	const respectLines = scaledFrom
+	const respectLines = isAdapt
 		? [
-				"IMPORTANTE: estas cantidades Y los tiempos YA están adaptados a las raciones pedidas.",
-				"Cópialos EXACTAMENTE. NO multipliques otra vez ni dejes los valores originales de las capturas.",
-				"Cocción/sofrito un poco más largos; picar/mezclar y horno suben menos (no al doble). Velocidades, temperaturas y el precalentamiento del horno no se tocan.",
-				"Solo conviértela a formato Thermomix (pasos con tiempo/temperatura/velocidad).",
+				"Esta receta YA es de Thermomix. Tu trabajo es ADAPTARLA, no reescribirla.",
+				"Mismos ingredientes, misma técnica, mismo orden de pasos.",
+				"Si la usuaria pide raciones o calorías, escala cantidades y tiempos con criterio de cocina (no una regla de tres) para que quede rico.",
+				"Velocidades y temperaturas: iguales. No fusiones ni partas pasos. No 'mejores' el plato.",
 			]
 		: [
-				"IMPORTANTE: respeta EXACTAMENTE estos ingredientes, cantidades y pasos.",
-				"NO la mejores ni cambies proporciones por iniciativa propia.",
-				"Solo conviértela a formato Thermomix y aplica ÚNICAMENTE la adaptación que pida la usuaria (raciones, calorías, sin gluten, etc.).",
-				"Si la adaptación cambia las raciones o calorías, ajusta también los tiempos al nuevo volumen: cocción/sofrito un poco más (no el doble); picar/mezclar y horno aún menos; velocidades, temperaturas y precalentamiento iguales.",
+				"Esta receta NO es de Thermomix. Tradúcela al vaso: mismos ingredientes y cantidades, técnica pasada a pasos con tiempo/temperatura/velocidad.",
+				"No inventes un plato distinto ni añadas ingredientes por iniciativa propia.",
+				"Si también pide raciones o calorías, aplica esa adaptación con criterio de cocina sobre la traducción.",
 			];
 
 	return [
-		`Receta original de Cookidoo (BASE FIJA): ${recipe.title}`,
-		servingsLine,
+		header,
+		`Raciones originales: ${recipe.servings || "?"}`,
 		`Tiempo: ~${recipe.total_time_min || "?"} min`,
 		calories ? `Nutrición original: ${calories}` : "",
 		"",
@@ -63,7 +89,7 @@ function formatImportedRecipeForAi(recipe, { scaledFrom } = {}) {
 		stepLines || "(sin pasos)",
 		"",
 		...respectLines,
-		"En los pasos, menciona cada ingrediente con el MISMO nombre que en la lista (p. ej. jamón cocido, no jamón de York).",
+		"En los pasos, menciona cada ingrediente con el MISMO nombre que en la lista.",
 		"No escribas ingredient_indices, corchetes de índice ni JSON en el texto que lee la usuaria.",
 	]
 		.filter((line) => line !== "")
@@ -75,57 +101,40 @@ function publicImportedRecipe(recipe) {
 	return rest;
 }
 
+function followUpForImport(mode, instruction) {
+	if (mode === TASK_MODES.adaptar) {
+		return instruction
+			? `ADAPTAR esta receta Thermomix a: ${instruction}. Quiero el MISMO plato, no una receta nueva. Escala cantidades y tiempos con criterio de cocina para que quede rico.`
+			: "Quiero esta receta Thermomix TAL CUAL. No cambies ingredientes, cantidades, tiempos, velocidades ni técnica. Solo maquétala.";
+	}
+
+	return instruction
+		? `TRADUCIR esta receta a Thermomix. Adaptación extra: ${instruction}. Mismos ingredientes; no inventes otro plato.`
+		: "Traduce esta receta a Thermomix: mismos ingredientes y cantidades, técnica pasada al vaso.";
+}
+
 /**
- * Deja la receta importada como BASE FIJA. Si pide otras raciones, escala las
- * cantidades EN CÓDIGO: el modelo copiaba el original y no multiplicaba.
+ * Deja la receta importada como partida para ADAPTAR (ya TM) o TRADUCIR.
+ * No escala en código: el modelo ajusta cantidades y tiempos con criterio de cocina.
  */
-function seedImportedRecipe(userId, recipe, extraInstruction) {
+function seedImportedRecipe(
+	userId,
+	recipe,
+	extraInstruction,
+	{ assumedThermomix } = {},
+) {
 	resetConversation(userId);
 
 	const instruction = String(extraInstruction || "").trim();
-	const change = inferServingsChange(instruction, recipe.servings);
-	let toSeed = recipe;
-	let scaledFrom = null;
+	const isThermomix =
+		assumedThermomix === true ||
+		(assumedThermomix !== false && recipeLooksLikeThermomix(recipe));
+	const mode = isThermomix ? TASK_MODES.adaptar : TASK_MODES.traducir;
 
-	if (change) {
-		toSeed = scaleRecipe(recipe, change.original, change.target);
-		scaledFrom = change.original;
-		console.log(
-			`Escalado en código: ${change.original} → ${change.target} raciones (factor ${change.target}/${change.original})`,
-		);
-		const sample = (toSeed.ingredients || [])
-			.slice(0, 3)
-			.map((item) => `${item.quantity} ${item.name}`)
-			.join("; ");
-		if (sample) {
-			console.log(`Ingredientes tras escalar: ${sample}`);
-		}
-		const timeSample = (toSeed.steps || [])
-			.filter((step) => step.tm_mode)
-			.slice(0, 4)
-			.map((step) => step.tm_mode)
-			.join(" · ");
-		if (timeSample) {
-			console.log(`Tiempos tras escalar: ${timeSample}`);
-		}
-	}
-
-	const originalBlock = formatImportedRecipeForAi(toSeed, { scaledFrom });
+	const originalBlock = formatImportedRecipeForAi(recipe, { mode });
 	pushConversationMessage(userId, "user", originalBlock);
 	setCurrentRecipeText(userId, originalBlock);
-
-	if (instruction) {
-		const followUp = scaledFrom
-			? `Adaptación extra (además del cambio a ${toSeed.servings} raciones, ya aplicado en cantidades y tiempos de cocción): ${instruction}`
-			: `Adaptación que quiero: ${instruction}`;
-		pushConversationMessage(userId, "user", followUp);
-	} else {
-		pushConversationMessage(
-			userId,
-			"user",
-			"Quiero esta receta tal cual, convertida a formato Thermomix, sin cambiar ingredientes ni cantidades.",
-		);
-	}
+	pushConversationMessage(userId, "user", followUpForImport(mode, instruction));
 }
 
 /**
@@ -167,15 +176,15 @@ async function seedCookidooUrlIfPresent({
 		);
 	}
 
-	seedImportedRecipe(userId, recipe, extraInstruction);
+	seedImportedRecipe(userId, recipe, extraInstruction, {
+		assumedThermomix: true,
+	});
 
 	return { imported: true, recipe, extraInstruction };
 }
 
 /**
- * Igual que seedCookidooUrlIfPresent pero a partir de capturas de pantalla:
- * extrae la receta de las imágenes con visión y la deja como BASE FIJA en el
- * historial para que Mimi la clone aplicando solo la adaptación pedida.
+ * Extrae la receta de capturas y la deja como partida para ADAPTAR o TRADUCIR.
  * @param {object} args
  * @param {string} args.userId
  * @param {string[]} args.images data URLs o URLs http(s) de las capturas.
@@ -205,8 +214,11 @@ async function seedCookidooImagesIfPresent({
 		);
 	}
 
+	const mode = recipeLooksLikeThermomix(recipe)
+		? TASK_MODES.adaptar
+		: TASK_MODES.traducir;
 	console.log(
-		`Capturas Cookidoo → "${recipe.title}" · ${recipe.servings ?? "?"} raciones · ${recipe.ingredients.length} ingredientes`,
+		`Capturas → "${recipe.title}" · ${mode} · ${recipe.servings ?? "?"} raciones · ${recipe.ingredients.length} ingredientes`,
 	);
 
 	seedImportedRecipe(userId, recipe, extraInstruction);
@@ -222,4 +234,5 @@ module.exports = {
 	seedCookidooUrlIfPresent,
 	seedCookidooImagesIfPresent,
 	formatImportedRecipeForAi,
+	recipeLooksLikeThermomix,
 };

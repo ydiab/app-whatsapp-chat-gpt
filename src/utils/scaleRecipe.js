@@ -1,6 +1,6 @@
 /**
- * Escala cantidades de una receta importada. El modelo tiende a copiar la
- * "BASE FIJA" tal cual; multiplicar aquí evita depender de que lo haga él.
+ * Escalado lineal de cantidades y tiempos. El chat ya no lo usa al importar:
+ * Mimi ajusta con criterio de cocina. Se deja por si hace falta un factor fijo.
  */
 
 const UNICODE_FRACTIONS = {
